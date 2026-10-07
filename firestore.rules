@@ -1,0 +1,93 @@
+rules_version = '2';
+
+// Publish with: firebase deploy --only firestore:rules
+//
+// Admins are the documents in /admins/{uid} (create one per admin UID in the Firebase console).
+// Without these rules the default "test mode" lets ANY visitor ban users, rewrite stats or wipe
+// the username index.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function unchanged(field) {
+      return !(field in request.resource.data) || request.resource.data[field] == resource.data[field];
+    }
+
+    function notBanned() {
+      let profile = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return !profile.exists() || !(profile.data.get('isBanned', false) == true);
+    }
+
+    // Admin allowlist: readable by the user themself, managed only from the console.
+    match /admins/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if false;
+    }
+
+    // Public profile and stats. Only the owner or an admin may write; ban flags are admin-only.
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create: if isSelf(uid)
+        && !('isBanned' in request.resource.data)
+        && request.resource.data.username is string
+        && request.resource.data.username.size() <= 20;
+      allow update: if isAdmin()
+        || (isSelf(uid) && unchanged('isBanned') && unchanged('username') && unchanged('usernameLower') && unchanged('createdAt'));
+      allow delete: if isAdmin();
+    }
+
+    // Username index: one document per lowercase username, pointing at its owner.
+    match /usernames/{name} {
+      allow read: if true;
+      allow create: if isSelf(request.resource.data.uid)
+        && name.matches('^[a-z0-9_]{3,20}$');
+      allow update, delete: if isAdmin();
+    }
+
+    // Wallet index: one document per lowercase address. A wallet belongs to one account.
+    match /wallets/{address} {
+      allow read: if signedIn();
+      allow create: if isSelf(request.resource.data.uid)
+        && request.resource.data.get('banned', false) == false;
+      allow update: if isAdmin()
+        || (isSelf(resource.data.uid) && unchanged('uid') && unchanged('banned'));
+      allow delete: if isAdmin() || isSelf(resource.data.uid);
+    }
+
+    // Activity logs written by the app on behalf of the signed-in user. Append-only for users.
+    match /egg_mints/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isSelf(request.resource.data.uid) && notBanned();
+      allow update, delete: if isAdmin();
+    }
+
+    match /stakes/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isSelf(request.resource.data.uid) && notBanned();
+      allow update: if isAdmin() || (isSelf(resource.data.uid) && unchanged('uid') && unchanged('amount'));
+      allow delete: if isAdmin();
+    }
+
+    match /withdrawals/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isSelf(request.resource.data.uid) && notBanned();
+      allow update, delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
