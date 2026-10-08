@@ -23,8 +23,18 @@ export interface FarmData {
   rewardRate: bigint;
   tokenBalance: bigint;
   pendingEggs: EggItem[];
+  /** Farm paused: no new stakes or claims; withdrawals return NFTs and keep rewards owed. */
+  paused: boolean;
   /** When the snapshot was taken (ms), used to extrapolate pending rewards in real time. */
   fetchedAt: number;
+}
+
+export interface WithdrawResult {
+  /** DAPPF actually minted to the user. */
+  claimed: bigint;
+  /** Rewards that stayed owed (farm paused, supply cap or token refused to mint). */
+  deferred: bigint;
+  hash: string;
 }
 
 const MAX_BATCH = 50;
@@ -41,12 +51,13 @@ export async function fetchFarmData(account: string): Promise<FarmData> {
   const farm = readContract('farm');
   const token = readContract('token');
 
-  const [owned, info, balance, eggs, rewardRate] = await Promise.all([
+  const [owned, info, balance, eggs, rewardRate, paused] = await Promise.all([
     nft.tokensOfOwner(account),
     farm.getUserInfo(account),
     token.balanceOf(account),
     nft.pendingEggsOf(account),
     farm.rewardRate(),
+    farm.paused(),
   ]);
 
   return {
@@ -58,6 +69,7 @@ export async function fetchFarmData(account: string): Promise<FarmData> {
     rewardRate,
     tokenBalance: balance,
     pendingEggs: eggs.eggIds.map((id: bigint, i: number) => ({ id: Number(id), commitBlock: Number(eggs.commitBlocks[i]) })),
+    paused,
     fetchedAt: Date.now(),
   };
 }
@@ -74,33 +86,36 @@ export async function stakeNfts(tokenIds: number[], callbacks?: TxCallbacks) {
 
   if (!approved) {
     callbacks?.onStep?.(`Autorize o farm a movimentar seus NFTs (${++step}/${totalSteps})…`);
-    await sendTx(nft.setApprovalForAll(CONTRACTS.farm, true), callbacks);
+    await sendTx(async () => nft.setApprovalForAll(CONTRACTS.farm, true), callbacks);
   }
   let receipt;
   for (const batch of batches) {
     if (totalSteps > 1) callbacks?.onStep?.(`Confirme o stake (${++step}/${totalSteps})…`);
-    receipt = await sendTx(farm.stake(batch), callbacks);
+    receipt = await sendTx(async () => farm.stake(batch), callbacks);
   }
   return receipt!;
 }
 
-export async function withdrawNfts(tokenIds: number[], callbacks?: TxCallbacks) {
+export async function withdrawNfts(tokenIds: number[], callbacks?: TxCallbacks): Promise<WithdrawResult> {
   const farm = await writeContract('farm');
   const batches = chunk(tokenIds, MAX_BATCH);
   let claimed = 0n;
+  let deferred = 0n;
   let hash = '';
   for (const [i, batch] of batches.entries()) {
     if (batches.length > 1) callbacks?.onStep?.(`Confirme o saque (${i + 1}/${batches.length})…`);
-    const receipt = await sendTx(farm.withdraw(batch), callbacks);
+    const receipt = await sendTx(async () => farm.withdraw(batch), callbacks);
     hash = receipt.hash;
     for (const event of eventsOf(receipt, 'farm', 'RewardClaimed')) claimed += event.args.reward as bigint;
+    // The last batch's RewardDeferred carries the full amount still owed.
+    deferred = eventsOf(receipt, 'farm', 'RewardDeferred').reduce((sum, e) => sum + (e.args.amount as bigint), 0n);
   }
-  return { claimed, hash };
+  return { claimed, deferred, hash };
 }
 
 export async function claimRewards(callbacks?: TxCallbacks) {
   const farm = await writeContract('farm');
-  const receipt = await sendTx(farm.claimAll(), callbacks);
+  const receipt = await sendTx(async () => farm.claimAll(), callbacks);
   const claimed = eventsOf(receipt, 'farm', 'RewardClaimed').reduce((sum, e) => sum + (e.args.reward as bigint), 0n);
   return { claimed, hash: receipt.hash };
 }

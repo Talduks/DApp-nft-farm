@@ -37,6 +37,15 @@ export async function getChainId(): Promise<number> {
   return Number(await ethereum().request({ method: 'eth_chainId' }));
 }
 
+/** Throws unless the wallet is on our chain right now. Called immediately before every broadcast. */
+export async function assertWalletChain(): Promise<void> {
+  const chainId = await getChainId();
+  setWalletChainId(chainId);
+  if (chainId !== CHAIN.id) {
+    throw new Error(`A carteira está em outra rede. Volte para ${CHAIN.name} e tente novamente.`);
+  }
+}
+
 export async function getAccounts(): Promise<string[]> {
   if (!hasWallet()) return [];
   const accounts = (await ethereum().request({ method: 'eth_accounts' })) as string[];

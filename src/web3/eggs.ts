@@ -44,7 +44,7 @@ export async function getBlockNumber(): Promise<number> {
 /** Buys eggs (commit step). Returns the new egg ids and the block they were bought in. */
 export async function buyEggs(quantity: number, unitPrice: bigint, callbacks?: TxCallbacks) {
   const nft = await writeContract('nft');
-  const receipt = await sendTx(nft.buyEggs(quantity, { value: unitPrice * BigInt(quantity) }), callbacks);
+  const receipt = await sendTx(async () => nft.buyEggs(quantity, { value: unitPrice * BigInt(quantity) }), callbacks);
   const [event] = eventsOf(receipt, 'nft', 'EggsPurchased');
   const first = Number(event.args.firstEggId);
   const eggIds = Array.from({ length: Number(event.args.quantity) }, (_, i) => first + i);
@@ -60,7 +60,12 @@ export async function waitForBlockAfter(blockNumber: number, timeoutMs = 20_000)
   const provider = getReadProvider();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if ((await provider.getBlockNumber()) > blockNumber) return;
+    try {
+      if ((await provider.getBlockNumber()) > blockNumber) return;
+    } catch (error) {
+      // Transient RPC hiccup: keep waiting; the hatch transaction itself validates the block.
+      console.warn('getBlockNumber failed while incubating, retrying', error);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
@@ -68,7 +73,7 @@ export async function waitForBlockAfter(blockNumber: number, timeoutMs = 20_000)
 /** Hatches eggs (reveal step). */
 export async function hatchEggs(eggIds: number[], callbacks?: TxCallbacks) {
   const nft = await writeContract('nft');
-  const receipt = await sendTx(nft.hatchEggs(eggIds), callbacks);
+  const receipt = await sendTx(async () => nft.hatchEggs(eggIds), callbacks);
   const results: HatchResult[] = eventsOf(receipt, 'nft', 'EggHatched').map((e) => ({
     eggId: Number(e.args.eggId),
     tokenId: Number(e.args.tokenId),

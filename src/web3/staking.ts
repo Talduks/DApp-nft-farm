@@ -2,6 +2,7 @@ import { Signature, type Contract, type JsonRpcSigner } from 'ethers';
 import { CONTRACTS } from '../config';
 import { readContract, sendTx, writeContract, type TxCallbacks } from './contracts';
 import { isUserRejection } from './errors';
+import { getReadProvider } from './wallet';
 
 export interface StakingPlan {
   months: number;
@@ -23,20 +24,26 @@ export interface StakingData {
   paused: boolean;
   balance: bigint;
   positions: StakePosition[];
+  /** Latest block timestamp (seconds); lock expiry is judged by chain time, not the device clock. */
+  chainTime: number;
+  fetchedAt: number;
 }
 
 export async function fetchStakingData(account: string): Promise<StakingData> {
   const staking = readContract('staking');
   const token = readContract('token');
-  const [plans, rewardPool, paused, balance, active] = await Promise.all([
+  const [plans, rewardPool, paused, balance, active, block] = await Promise.all([
     staking.getPlans(),
     staking.rewardPool(),
     staking.paused(),
     token.balanceOf(account),
     staking.getActiveStakes(account),
+    getReadProvider().getBlock('latest'),
   ]);
 
   return {
+    chainTime: block?.timestamp ?? Math.floor(Date.now() / 1000),
+    fetchedAt: Date.now(),
     plans: plans.months
       .map((m: bigint, i: number) => ({ months: Number(m), aprBps: Number(plans.aprs[i]) }))
       .filter((p: StakingPlan) => p.aprBps > 0)
@@ -92,25 +99,34 @@ export async function stakeTokens(amount: bigint, months: number, callbacks?: Tx
   const owner = await signer.getAddress();
 
   const allowance: bigint = await token.allowance(owner, CONTRACTS.staking);
-  if (allowance >= amount) return sendTx(staking.stake(amount, months), callbacks);
+  if (allowance >= amount) return sendTx(async () => staking.stake(amount, months), callbacks);
 
+  // Only a failure to *sign* falls back to approve + stake. A revert of stakeWithPermit itself
+  // (pool too small, paused…) is a real error and must reach the user as such.
+  let permit: Awaited<ReturnType<typeof signPermit>> | null = null;
   try {
     callbacks?.onStep?.('Assine a autorização na carteira (sem custo de gás)…');
-    const permit = await signPermit(token, signer, owner, amount);
-    callbacks?.onStep?.('Confirme o stake na carteira…');
-    return await sendTx(staking.stakeWithPermit(amount, months, permit.deadline, permit.v, permit.r, permit.s), callbacks);
+    permit = await signPermit(token, signer, owner, amount);
   } catch (error) {
     if (isUserRejection(error)) throw error;
-    console.warn('Permit failed, falling back to approve + stake', error);
+    console.warn('Wallet could not sign the permit, falling back to approve + stake', error);
+  }
+  if (permit) {
+    const { deadline, v, r, s } = permit;
+    callbacks?.onStep?.('Confirme o stake na carteira…');
+    return sendTx(async () => staking.stakeWithPermit(amount, months, deadline, v, r, s), callbacks);
   }
 
   callbacks?.onStep?.('Aprove o uso dos seus tokens (1/2)…');
-  await sendTx(token.approve(CONTRACTS.staking, amount), callbacks);
+  await sendTx(async () => token.approve(CONTRACTS.staking, amount), callbacks);
   callbacks?.onStep?.('Confirme o stake (2/2)…');
-  return sendTx(staking.stake(amount, months), callbacks);
+  return sendTx(async () => staking.stake(amount, months), callbacks);
 }
 
 export async function unstake(stakeIds: number[], callbacks?: TxCallbacks) {
   const staking = await writeContract('staking');
-  return sendTx(stakeIds.length === 1 ? staking.unstake(stakeIds[0]) : staking.unstakeMany(stakeIds), callbacks);
+  return sendTx(
+    async () => (stakeIds.length === 1 ? staking.unstake(stakeIds[0]) : staking.unstakeMany(stakeIds)),
+    callbacks,
+  );
 }

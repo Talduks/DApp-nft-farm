@@ -12,6 +12,7 @@ import { fetchStakingData, quoteReward, stakeTokens, unstake, type StakePosition
 
 const PLAN_COLORS = ['from-blue-500 to-cyan-500', 'from-purple-500 to-pink-500', 'from-orange-500 to-red-500'];
 const MONTH_SECONDS = 30 * 24 * 60 * 60;
+const UNLOCK_SLACK_SECONDS = 15;
 
 interface TokenStakingProps {
   uid: string;
@@ -40,7 +41,9 @@ const TokenStaking = ({ uid, account, onChanged }: TokenStakingProps) => {
   const plan = plans.find((p) => p.months === selectedMonths) ?? plans[plans.length - 1];
   const amount = parseAmount(input);
   const reward = amount && plan ? quoteReward(amount, plan) : 0n;
-  const now = Math.floor(Date.now() / 1000);
+  // Chain time (latest block + elapsed), not the device clock: the contract judges `endTime`
+  // against block.timestamp, and a few seconds of slack avoids an avoidable StillLocked revert.
+  const now = data ? data.chainTime + Math.floor((Date.now() - data.fetchedAt) / 1000) - UNLOCK_SLACK_SECONDS : 0;
 
   const validation = useMemo(() => {
     if (!data || !input) return null;

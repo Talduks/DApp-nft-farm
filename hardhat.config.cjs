@@ -34,7 +34,7 @@ module.exports = {
         apiKey: process.env.POLYGONSCAN_API_KEY || "",
     },
     gasReporter: {
-        enabled: Boolean(process.env.REPORT_GAS),
+        enabled: process.env.REPORT_GAS === "true",
         currency: "USD",
     },
 };

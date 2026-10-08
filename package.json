@@ -14,7 +14,9 @@
     "deploy:local": "hardhat run scripts/deploy.cjs --network localhost",
     "deploy:amoy": "hardhat run scripts/deploy.cjs --network amoy",
     "deploy:polygon": "hardhat run scripts/deploy.cjs --network polygon",
-    "withdraw-bot": "hardhat run scripts/auto-withdraw.cjs --network polygon"
+    "withdraw-bot": "hardhat run scripts/auto-withdraw.cjs --network polygon",
+    "keeper": "hardhat run scripts/hatch-keeper.cjs --network polygon",
+    "rules:deploy": "firebase deploy --only firestore:rules"
   },
   "dependencies": {
     "ethers": "^6.15.0",

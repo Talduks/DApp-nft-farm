@@ -76,12 +76,21 @@ export async function registerUser(username: string, password: string) {
         totalRewardsClaimed: 0,
       });
     });
-    await updateProfile(user, { displayName: username.trim() });
   } catch (error) {
-    await deleteUser(user).catch(() => undefined);
+    // The Firestore side is the only fatal step: roll the Auth account back so the username
+    // isn't burned. Retry once — a failed rollback would leave a profile-less account behind.
+    await deleteUser(user).catch(() => deleteUser(user).catch(() => undefined));
     throw error;
   }
+  // Cosmetic: the display name is derived from the profile anyway, so a failure here is not fatal.
+  await updateProfile(user, { displayName: username.trim() }).catch(() => undefined);
   return user;
+}
+
+/** Whether the account is banned. Used by the app shell before rendering any signed-in UI. */
+export async function isUserBanned(uid: string): Promise<boolean> {
+  const profile = await getDoc(doc(db, 'users', uid));
+  return profile.exists() && profile.data().isBanned === true;
 }
 
 export async function loginUser(username: string, password: string) {
@@ -132,6 +141,9 @@ export async function linkWalletToUser(uid: string, walletAddress: string) {
       if (!walletSnap.exists()) tx.set(walletRef, { uid, banned: false, linkedAt: serverTimestamp() });
       return;
     }
+    // All reads must happen before the first write in a transaction.
+    const oldWalletRef = current ? doc(db, 'wallets', current) : null;
+    const oldWalletSnap = oldWalletRef ? await tx.get(oldWalletRef) : null;
 
     if (current && profile.walletLastUpdated) {
       const daysPassed = (Date.now() - profile.walletLastUpdated.toDate().getTime()) / 86_400_000;
@@ -145,6 +157,10 @@ export async function linkWalletToUser(uid: string, walletAddress: string) {
 
     tx.set(userRef, { address, addressLower: lower, walletLastUpdated: serverTimestamp() }, { merge: true });
     if (!walletSnap.exists()) tx.set(walletRef, { uid, banned: false, linkedAt: serverTimestamp() });
-    if (current) tx.delete(doc(db, 'wallets', current));
+    // Release the previous wallet only if its index document exists and is ours (profiles from
+    // before the wallets index have none, and deleting a missing doc is denied by the rules).
+    if (oldWalletRef && oldWalletSnap?.exists() && oldWalletSnap.data().uid === uid && !oldWalletSnap.data().banned) {
+      tx.delete(oldWalletRef);
+    }
   });
 }

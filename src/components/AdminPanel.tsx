@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { formatEther, formatUnits, isAddress, parseEther, parseUnits } from 'ethers';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { ethers, formatEther, formatUnits, isAddress, parseEther, parseUnits } from 'ethers';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Ban,
@@ -34,6 +34,8 @@ import {
   setPaused,
   setRewardRate,
   setStakingPlan,
+  setTreasury,
+  sweepToTreasury,
   withdrawSales,
   withdrawStakingPool,
   type AdminOverview,
@@ -107,6 +109,13 @@ function Overview({ data }: { data: AdminOverview }) {
           <Card
             title="Vendas"
             value={data.nft.paused ? <span className="text-amber-400">Pausadas</span> : <span className="text-emerald-400">Ativas</span>}
+            hint={
+              data.nft.treasury === ethers.ZeroAddress ? (
+                <span className="text-amber-400">Tesouraria não definida</span>
+              ) : (
+                <>Tesouraria {shortAddress(data.nft.treasury)}</>
+              )
+            }
           />
         </div>
       </section>
@@ -182,6 +191,7 @@ function Overview({ data }: { data: AdminOverview }) {
 function Controls({ data, account, onDone }: { data: AdminOverview; account: string; onDone: () => Promise<void> }) {
   const run = useTx();
   const [withdrawTo, setWithdrawTo] = useState(account);
+  const [treasuryInput, setTreasuryInput] = useState(data.nft.treasury === ethers.ZeroAddress ? '' : data.nft.treasury);
   const [price, setPrice] = useState(formatEther(data.nft.mintPrice));
   const [perDay, setPerDay] = useState(formatUnits(data.farm.rewardRate * 86_400n, 18));
   const [fundAmount, setFundAmount] = useState('');
@@ -225,8 +235,45 @@ function Controls({ data, account, onDone }: { data: AdminOverview; account: str
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ControlForm
-          title="Sacar vendas de ovos"
-          description={`Envia ${formatNumber(Number(formatEther(data.nft.balance)), 4)} ${CHAIN.currency} do contrato para o endereço informado.`}
+          title="Tesouraria dos ovos"
+          description={
+            <>
+              Destino fixo de "Varrer para tesouraria" (ideal: multisig ou carteira fria). Com ela definida, qualquer carteira — inclusive
+              o bot <code className="rounded bg-black/30 px-1">npm run withdraw-bot</code> — pode disparar o saque sem ter a chave do dono.
+              {data.nft.treasury === ethers.ZeroAddress && <b className="text-amber-300"> Ainda não definida.</b>}
+            </>
+          }
+          disabled={!isNftOwner || busy}
+        >
+          <input value={treasuryInput} onChange={(e) => setTreasuryInput(e.target.value.trim())} className={inputClass} placeholder="0x…" />
+          <button
+            className={buttonClass}
+            disabled={!isAddress(treasuryInput) || treasuryInput.toLowerCase() === data.nft.treasury.toLowerCase()}
+            onClick={() => execute('Definindo tesouraria', (cb) => setTreasury(treasuryInput, cb))}
+          >
+            Salvar
+          </button>
+        </ControlForm>
+
+        <ControlForm
+          title="Varrer para tesouraria"
+          description={`Envia ${formatNumber(Number(formatEther(data.nft.balance)), 4)} ${CHAIN.currency} do contrato para ${
+            data.nft.treasury === ethers.ZeroAddress ? 'a tesouraria (defina-a primeiro)' : shortAddress(data.nft.treasury)
+          }. Qualquer carteira pode executar.`}
+          disabled={busy}
+        >
+          <button
+            className={`${buttonClass} w-full`}
+            disabled={data.nft.balance === 0n || data.nft.treasury === ethers.ZeroAddress}
+            onClick={() => execute('Varrendo para a tesouraria', (cb) => sweepToTreasury(cb))}
+          >
+            Varrer agora
+          </button>
+        </ControlForm>
+
+        <ControlForm
+          title="Sacar vendas para outro endereço"
+          description={`Só o dono. Envia ${formatNumber(Number(formatEther(data.nft.balance)), 4)} ${CHAIN.currency} do contrato para o endereço informado.`}
           disabled={!isNftOwner || busy}
         >
           <input value={withdrawTo} onChange={(e) => setWithdrawTo(e.target.value.trim())} className={inputClass} placeholder="0x…" />
@@ -364,6 +411,15 @@ function UsersTab({ uid }: { uid: string }) {
   const [selected, setSelected] = useState<UserProfile | null>(null);
   const nfts = useAsyncData(selected?.address ?? null, fetchUserNfts, 60_000);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!selected) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelected(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selected]);
 
   const list = useMemo(() => {
     const term = search.toLowerCase();
@@ -545,6 +601,9 @@ function UsersTab({ uid }: { uid: string }) {
         {selected && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm" onClick={() => setSelected(null)}>
             <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="user-nfts-title"
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
@@ -553,12 +612,12 @@ function UsersTab({ uid }: { uid: string }) {
             >
               <div className="mb-6 flex items-center justify-between">
                 <div className="min-w-0">
-                  <h2 className="flex items-center gap-2 text-2xl font-bold text-white">
+                  <h2 id="user-nfts-title" className="flex items-center gap-2 text-2xl font-bold text-white">
                     <Egg className="text-yellow-500" /> NFTs de {selected.username}
                   </h2>
                   <p className="mt-1 truncate font-mono text-sm text-gray-400">{selected.address}</p>
                 </div>
-                <button onClick={() => setSelected(null)} className="rounded-full p-2 hover:bg-white/10" aria-label="Fechar">
+                <button autoFocus onClick={() => setSelected(null)} className="rounded-full p-2 hover:bg-white/10" aria-label="Fechar">
                   <X size={24} className="text-gray-400" />
                 </button>
               </div>

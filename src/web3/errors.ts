@@ -17,6 +17,12 @@ const MESSAGES: Record<string, string> = {
   ZeroSpeed: 'Este NFT não tem velocidade de farm.',
   RateTooHigh: 'Taxa de recompensa acima do máximo permitido.',
   NothingToClaim: 'Não há recompensas para resgatar ainda.',
+  SupplyExhausted: `O supply máximo de ${TOKEN_SYMBOL} foi atingido: não há mais recompensas a emitir.`,
+  RewardMintFailed: `O farm não conseguiu emitir ${TOKEN_SYMBOL} agora (permissão do token). Suas recompensas continuam registradas; tente mais tarde.`,
+  TreasuryNotSet: 'A tesouraria ainda não foi definida pelo dono do contrato.',
+  RenounceDisabled: 'Este contrato não permite abrir mão da propriedade; transfira-a em vez disso.',
+  AccessControlEnforcedDefaultAdminRules: 'O admin do token só muda pela transferência em duas etapas (beginDefaultAdminTransfer).',
+  AccessControlInvalidDefaultAdmin: 'Apenas o admin pendente pode aceitar a transferência.',
   // TokenStaking
   ZeroAmount: 'Informe um valor maior que zero.',
   InvalidPlan: 'Este plano de staking não está disponível.',

@@ -5,7 +5,7 @@ import type { NftItem } from './farm';
 
 export interface AdminOverview {
   owners: Record<'nft' | 'farm' | 'staking', string>;
-  nft: { balance: bigint; mintPrice: bigint; eggsSold: number; totalMinted: number; paused: boolean };
+  nft: { balance: bigint; mintPrice: bigint; eggsSold: number; totalMinted: number; paused: boolean; treasury: string };
   farm: { rewardRate: bigint; maxRewardRate: bigint; totalSpeed: number; totalStaked: number; paused: boolean };
   token: { totalSupply: bigint; maxSupply: bigint };
   staking: {
@@ -34,13 +34,14 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
   const staking = readContract('staking');
   const provider = nft.runner!.provider!;
 
-  const [owners, balance, mintPrice, eggsSold, totalMinted, nftPaused] = await Promise.all([
+  const [owners, balance, mintPrice, eggsSold, totalMinted, nftPaused, treasury] = await Promise.all([
     fetchOwners(),
     provider.getBalance(CONTRACTS.nft),
     nft.mintPrice(),
     nft.nextEggId(),
     nft.totalMinted(),
     nft.paused(),
+    nft.treasury(),
   ]);
   const [rewardRate, maxRewardRate, totalSpeed, farmStaked, farmPaused, totalSupply, maxSupply] = await Promise.all([
     farm.rewardRate(),
@@ -64,7 +65,7 @@ export async function fetchAdminOverview(): Promise<AdminOverview> {
 
   return {
     owners,
-    nft: { balance, mintPrice, eggsSold: Number(eggsSold), totalMinted: Number(totalMinted), paused: nftPaused },
+    nft: { balance, mintPrice, eggsSold: Number(eggsSold), totalMinted: Number(totalMinted), paused: nftPaused, treasury },
     farm: { rewardRate, maxRewardRate, totalSpeed: Number(totalSpeed), totalStaked: Number(farmStaked), paused: farmPaused },
     token: { totalSupply, maxSupply },
     staking: {
@@ -89,20 +90,29 @@ export async function fetchUserNfts(address: string): Promise<(NftItem & { stake
 }
 
 export async function withdrawSales(to: string, callbacks?: TxCallbacks) {
-  return sendTx((await writeContract('nft')).withdraw(to), callbacks);
+  return sendTx(async () => (await writeContract('nft')).withdraw(to), callbacks);
+}
+
+export async function setTreasury(treasury: string, callbacks?: TxCallbacks) {
+  return sendTx(async () => (await writeContract('nft')).setTreasury(treasury), callbacks);
+}
+
+/** Sweeps egg sales to the on-chain treasury. Anyone may call it; only the owner picks the destination. */
+export async function sweepToTreasury(callbacks?: TxCallbacks) {
+  return sendTx(async () => (await writeContract('nft')).withdrawToTreasury(), callbacks);
 }
 
 export async function setMintPrice(price: bigint, callbacks?: TxCallbacks) {
-  return sendTx((await writeContract('nft')).setMintPrice(price), callbacks);
+  return sendTx(async () => (await writeContract('nft')).setMintPrice(price), callbacks);
 }
 
 export async function setRewardRate(rate: bigint, callbacks?: TxCallbacks) {
-  return sendTx((await writeContract('farm')).setRewardRate(rate), callbacks);
+  return sendTx(async () => (await writeContract('farm')).setRewardRate(rate), callbacks);
 }
 
 export async function setPaused(name: Exclude<ContractName, 'token'>, paused: boolean, callbacks?: TxCallbacks) {
   const contract = await writeContract(name);
-  return sendTx(paused ? contract.pause() : contract.unpause(), callbacks);
+  return sendTx(async () => paused ? contract.pause() : contract.unpause(), callbacks);
 }
 
 export async function fundStakingPool(amount: bigint, callbacks?: TxCallbacks) {
@@ -112,16 +122,16 @@ export async function fundStakingPool(amount: bigint, callbacks?: TxCallbacks) {
   const allowance: bigint = await token.allowance(owner, CONTRACTS.staking);
   if (allowance < amount) {
     callbacks?.onStep?.('Aprove os tokens para o pool (1/2)…');
-    await sendTx(token.approve(CONTRACTS.staking, amount), callbacks);
+    await sendTx(async () => token.approve(CONTRACTS.staking, amount), callbacks);
     callbacks?.onStep?.('Confirme o aporte (2/2)…');
   }
-  return sendTx(staking.fundRewards(amount), callbacks);
+  return sendTx(async () => staking.fundRewards(amount), callbacks);
 }
 
 export async function withdrawStakingPool(amount: bigint, to: string, callbacks?: TxCallbacks) {
-  return sendTx((await writeContract('staking')).withdrawRewardPool(amount, to), callbacks);
+  return sendTx(async () => (await writeContract('staking')).withdrawRewardPool(amount, to), callbacks);
 }
 
 export async function setStakingPlan(months: number, aprBps: number, callbacks?: TxCallbacks) {
-  return sendTx((await writeContract('staking')).setPlan(months, aprBps), callbacks);
+  return sendTx(async () => (await writeContract('staking')).setPlan(months, aprBps), callbacks);
 }

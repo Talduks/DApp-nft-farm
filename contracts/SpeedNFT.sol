@@ -47,6 +47,10 @@ contract SpeedNFT is ERC721, ERC721Enumerable, Ownable2Step, Pausable, Reentranc
     uint256 public nextEggId;
     uint256 private _nextTokenId;
 
+    /// @notice Fixed destination of `withdrawToTreasury`, so a keeper bot can sweep sales without
+    ///         holding the owner key.
+    address public treasury;
+
     mapping(uint256 tokenId => uint256) public farmingSpeeds;
     mapping(uint256 eggId => Egg) public eggs;
     mapping(address owner => uint256[]) private _pendingEggs;
@@ -56,6 +60,7 @@ contract SpeedNFT is ERC721, ERC721Enumerable, Ownable2Step, Pausable, Reentranc
     event EggHatched(uint256 indexed eggId, address indexed owner, uint256 indexed tokenId, uint256 speed, bool expired);
     event NftMinted(address indexed user, uint256 tokenId, uint256 speed);
     event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event Withdrawn(address indexed to, uint256 amount);
 
     error InvalidQuantity();
@@ -65,6 +70,8 @@ contract SpeedNFT is ERC721, ERC721Enumerable, Ownable2Step, Pausable, Reentranc
     error InvalidSpeed(uint256 speed);
     error InvalidPrice();
     error NothingToWithdraw();
+    error TreasuryNotSet();
+    error RenounceDisabled();
     error ZeroAddress();
 
     constructor(address initialOwner) ERC721("Speed NFT", "SPDNFT") Ownable(initialOwner) {}
@@ -169,10 +176,37 @@ contract SpeedNFT is ERC721, ERC721Enumerable, Ownable2Step, Pausable, Reentranc
 
     function withdraw(address payable to) external onlyOwner nonReentrant {
         if (to == address(0)) revert ZeroAddress();
+        _withdraw(to);
+    }
+
+    /// @notice Sets where `withdrawToTreasury` sends the proceeds (ideally a multisig / cold wallet).
+    function setTreasury(address newTreasury) external onlyOwner {
+        if (newTreasury == address(0)) revert ZeroAddress();
+        emit TreasuryUpdated(treasury, newTreasury);
+        treasury = newTreasury;
+    }
+
+    /**
+     * @notice Sends all proceeds to the owner-defined treasury. Callable by anyone: the caller
+     *         chooses only the timing, never the destination, so a sweeper bot needs gas but no
+     *         privileged key.
+     */
+    function withdrawToTreasury() external nonReentrant {
+        address to = treasury;
+        if (to == address(0)) revert TreasuryNotSet();
+        _withdraw(payable(to));
+    }
+
+    function _withdraw(address payable to) private {
         uint256 amount = address(this).balance;
         if (amount == 0) revert NothingToWithdraw();
         Address.sendValue(to, amount);
         emit Withdrawn(to, amount);
+    }
+
+    /// @dev An ownerless collection could never be unpaused or withdrawn; transfer ownership instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     /// @notice Pauses egg sales only. Hatching, transfers and staking keep working.

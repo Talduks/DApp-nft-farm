@@ -7,8 +7,10 @@
  * Optional environment variables (see .env.example):
  *   FARM_REWARD_RATE      wei per speed unit per second (default 1e14 = 0.0001 DAPPF)
  *   STAKING_REWARD_POOL   DAPPF to mint into the staking reward pool (default 0)
- *   OWNER_ADDRESS         final owner, ideally a Safe multisig. Ownership is proposed and must be
- *                         accepted by that address with acceptOwnership().
+ *   TREASURY_ADDRESS      where `withdrawToTreasury` sends egg sales (default: OWNER_ADDRESS, else deployer)
+ *   OWNER_ADDRESS         final owner, ideally a Safe multisig. Every hand-over is two-step: the new
+ *                         owner must call acceptOwnership() on SpeedNFT, NFTFarm and TokenStaking and
+ *                         acceptDefaultAdminTransfer() on DAppToken.
  */
 const hre = require("hardhat");
 const fs = require("fs");
@@ -23,6 +25,7 @@ async function send(txPromise, label) {
 async function main() {
     const { ethers, network } = hre;
     const [deployer] = await ethers.getSigners();
+    if (!deployer) throw new Error("PRIVATE_KEY not set in .env (see .env.example)");
     const { chainId } = await ethers.provider.getNetwork();
     const isLocal = network.name === "hardhat" || network.name === "localhost";
 
@@ -30,6 +33,11 @@ async function main() {
     const stakingPool = ethers.parseEther(process.env.STAKING_REWARD_POOL || "0");
     const finalOwner = process.env.OWNER_ADDRESS || "";
     if (finalOwner && !ethers.isAddress(finalOwner)) throw new Error("OWNER_ADDRESS is not a valid address");
+    if (finalOwner && finalOwner.toLowerCase() === deployer.address.toLowerCase()) {
+        throw new Error("OWNER_ADDRESS is the deployer itself; leave it empty to keep the deployer as owner");
+    }
+    const treasury = process.env.TREASURY_ADDRESS || finalOwner || deployer.address;
+    if (!ethers.isAddress(treasury)) throw new Error("TREASURY_ADDRESS is not a valid address");
 
     console.log(`Network:  ${network.name} (chainId ${chainId})`);
     console.log(`Deployer: ${deployer.address}`);
@@ -57,9 +65,10 @@ async function main() {
     await staking.waitForDeployment();
     console.log(`  ✔ TokenStaking  ${await staking.getAddress()}`);
 
-    console.log("\nConfiguring permissions...");
+    console.log("\nConfiguring...");
     const MINTER_ROLE = await token.MINTER_ROLE();
     await send(token.grantRole(MINTER_ROLE, await farm.getAddress()), "MINTER_ROLE granted to NFTFarm");
+    await send(nft.setTreasury(treasury), `SpeedNFT treasury set to ${treasury}`);
 
     if (stakingPool > 0n) {
         await send(token.grantRole(MINTER_ROLE, deployer.address), "temporary MINTER_ROLE for deployer");
@@ -76,14 +85,15 @@ async function main() {
     }
 
     if (finalOwner) {
-        console.log(`\nHanding over to ${finalOwner}...`);
+        console.log(`\nProposing hand-over to ${finalOwner}...`);
         await send(nft.transferOwnership(finalOwner), "SpeedNFT ownership proposed");
         await send(farm.transferOwnership(finalOwner), "NFTFarm ownership proposed");
         await send(staking.transferOwnership(finalOwner), "TokenStaking ownership proposed");
-        const ADMIN = await token.DEFAULT_ADMIN_ROLE();
-        await send(token.grantRole(ADMIN, finalOwner), "DAppToken admin granted");
-        await send(token.renounceRole(ADMIN, deployer.address), "deployer DAppToken admin removed");
-        console.log("  ⚠ The new owner must call acceptOwnership() on SpeedNFT, NFTFarm and TokenStaking.");
+        await send(token.beginDefaultAdminTransfer(finalOwner), "DAppToken admin transfer proposed");
+        console.log("  ⚠ Nothing changes until the new owner accepts. From that address, call:");
+        console.log("      acceptOwnership()             on SpeedNFT, NFTFarm and TokenStaking");
+        console.log("      acceptDefaultAdminTransfer()  on DAppToken");
+        console.log("    The deployer keeps control until then, so a wrong address can't lock you out.");
     }
 
     const deployment = {
@@ -92,6 +102,8 @@ async function main() {
         deployer: deployer.address,
         deployedAt: new Date().toISOString(),
         rewardRate: rewardRate.toString(),
+        treasury,
+        proposedOwner: finalOwner || null,
         contracts: {
             DAppToken: await token.getAddress(),
             SpeedNFT: await nft.getAddress(),

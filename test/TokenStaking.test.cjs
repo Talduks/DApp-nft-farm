@@ -166,6 +166,47 @@ describe("TokenStaking", function () {
         await expect(staking.connect(alice).stake(0, 3)).to.be.revertedWithCustomError(staking, "ZeroAmount");
         await expect(staking.connect(alice).fundRewards(0)).to.be.revertedWithCustomError(staking, "ZeroAmount");
     });
+
+    it("rejects duplicated ids in unstakeMany and cannot be renounced", async function () {
+        const { staking, alice } = await loadFixture(fundedFixture);
+        await staking.connect(alice).stake(E(100), 3);
+        await time.increase(3n * MONTH);
+        await expect(staking.connect(alice).unstakeMany([0, 0])).to.be.revertedWithCustomError(staking, "AlreadyWithdrawn");
+        await expect(staking.renounceOwnership()).to.be.revertedWithCustomError(staking, "RenounceDisabled");
+    });
+
+    it("still stakes when the permit was front-run", async function () {
+        const { staking, token, owner, bob } = await loadFixture(fundedFixture);
+        const [, , , , carol] = await ethers.getSigners();
+        await token.connect(owner).mint(carol.address, E(100));
+        const amount = E(100);
+        const deadline = BigInt(await time.latest()) + 3600n;
+        const { chainId } = await ethers.provider.getNetwork();
+        const signature = await carol.signTypedData(
+            { name: "DApp.io", version: "1", chainId, verifyingContract: await token.getAddress() },
+            {
+                Permit: [
+                    { name: "owner", type: "address" },
+                    { name: "spender", type: "address" },
+                    { name: "value", type: "uint256" },
+                    { name: "nonce", type: "uint256" },
+                    { name: "deadline", type: "uint256" },
+                ],
+            },
+            {
+                owner: carol.address,
+                spender: await staking.getAddress(),
+                value: amount,
+                nonce: await token.nonces(carol.address),
+                deadline,
+            }
+        );
+        const { v, r, s } = ethers.Signature.from(signature);
+        // Bob submits carol's permit first (front-run); the allowance is set and the nonce consumed.
+        await token.connect(bob).permit(carol.address, await staking.getAddress(), amount, deadline, v, r, s);
+        await staking.connect(carol).stakeWithPermit(amount, 3, deadline, v, r, s);
+        expect(await staking.totalStaked()).to.equal(amount);
+    });
 });
 
 describe("DAppToken", function () {
@@ -181,5 +222,29 @@ describe("DAppToken", function () {
         await expect(token.mint(owner.address, 1))
             .to.be.revertedWithCustomError(token, "MaxSupplyExceeded")
             .withArgs(1, 0);
+    });
+
+    it("transfers the admin role in two steps and refuses direct admin grants", async function () {
+        const { token, owner, alice, bob } = await loadFixture(deployFixture);
+        const ADMIN = await token.DEFAULT_ADMIN_ROLE();
+        await expect(token.grantRole(ADMIN, alice.address)).to.be.revertedWithCustomError(
+            token,
+            "AccessControlEnforcedDefaultAdminRules"
+        );
+        await token.beginDefaultAdminTransfer(alice.address);
+        expect(await token.defaultAdmin()).to.equal(owner.address);
+        await expect(token.connect(bob).acceptDefaultAdminTransfer()).to.be.revertedWithCustomError(
+            token,
+            "AccessControlInvalidDefaultAdmin"
+        );
+        await token.connect(alice).acceptDefaultAdminTransfer();
+        expect(await token.defaultAdmin()).to.equal(alice.address);
+        expect(await token.hasRole(ADMIN, owner.address)).to.equal(false);
+        // The new admin manages minters; the old one can't.
+        await expect(token.grantRole(await token.MINTER_ROLE(), bob.address)).to.be.revertedWithCustomError(
+            token,
+            "AccessControlUnauthorizedAccount"
+        );
+        await token.connect(alice).grantRole(await token.MINTER_ROLE(), bob.address);
     });
 });

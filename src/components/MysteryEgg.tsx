@@ -1,18 +1,19 @@
 import { useState } from 'react';
 import { formatEther } from 'ethers';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Clock, Egg, Loader2, Minus, Plus, ShieldCheck, Sparkles, Zap } from 'lucide-react';
+import { Clock, Egg, Loader2, Minus, Plus, ShieldCheck, Sparkles, Timer, Zap } from 'lucide-react';
 import { BLOCK_TIME_SECONDS, CHAIN } from '../config';
 import { useAsyncData } from '../hooks/useAsyncData';
 import { usePolling } from '../hooks/usePolling';
 import { useTx } from '../hooks/useTx';
 import { formatDuration, formatNumber } from '../lib/format';
-import { RARITIES, rarityOdds, rarityOf } from '../lib/nft';
+import { RARITIES, rarityOdds } from '../lib/nft';
 import { logEggHatches } from '../services/activity';
 import { buyEggs, fetchEggShop, getBlockNumber, hatchEggs, waitForBlockAfter, type HatchResult } from '../web3/eggs';
 import type { EggItem } from '../web3/farm';
 import { stakeNfts } from '../web3/farm';
 import NftCard from './NftCard';
+import { useToast } from './ui/Toaster';
 
 interface MysteryEggProps {
   uid: string;
@@ -24,8 +25,11 @@ interface MysteryEggProps {
 
 type Phase = 'idle' | 'buying' | 'incubating' | 'hatching';
 
+const DEFAULT_HATCH_WINDOW = 256;
+
 const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: MysteryEggProps) => {
   const run = useTx();
+  const toast = useToast();
   const { data: shop } = useAsyncData('egg-shop', () => fetchEggShop(), 30_000);
   const [quantity, setQuantity] = useState(1);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -41,44 +45,64 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
 
   const busy = phase !== 'idle';
   const maxPerTx = shop?.maxPerTx ?? 10;
+  const hatchWindow = shop?.hatchWindow ?? DEFAULT_HATCH_WINDOW;
+  const hatchDeadline = formatDuration(hatchWindow * BLOCK_TIME_SECONDS);
   const total = shop ? shop.price * BigInt(quantity) : 0n;
 
-  const hatch = async (eggIds: number[]) => {
+  /** Hatches eggs and shows the result. Returns true when at least one NFT was minted. */
+  const hatch = async (eggIds: number[]): Promise<boolean> => {
+    if (eggIds.length === 0) return false;
     setPhase('hatching');
-    const outcome = await run(
-      eggIds.length > 1 ? `Chocando ${eggIds.length} ovos` : 'Chocando ovo',
-      (cb) => hatchEggs(eggIds, cb),
-      'Seus NFTs nasceram!',
-    );
-    if (outcome) {
+    try {
+      const outcome = await run(
+        eggIds.length > 1 ? `Chocando ${eggIds.length} ovos` : 'Chocando ovo',
+        (cb) => hatchEggs(eggIds, cb),
+        'Seus NFTs nasceram!',
+      );
+      if (!outcome) return false;
+      if (outcome.results.length === 0) {
+        // Someone else (a keeper, another tab) hatched them first; the NFTs are already in the wallet.
+        toast.show({ type: 'info', title: 'Ovos já chocados', message: 'Esses ovos já tinham sido chocados. Confira seus NFTs no dashboard.' });
+        return false;
+      }
       setResults(outcome.results);
       void logEggHatches(uid, account, outcome.results, outcome.hash);
+      return true;
+    } finally {
+      // Refresh before leaving the busy state so the pending-eggs panel never shows hatched eggs.
+      await refresh();
+      setPhase('idle');
     }
-    setPhase('idle');
-    await refresh();
   };
 
   const handleBuy = async () => {
     if (!shop) return;
     setResults(null);
     setPhase('buying');
-    const bought = await run(
-      quantity > 1 ? `Comprando ${quantity} ovos` : 'Comprando ovo',
-      (cb) => buyEggs(quantity, shop.price, cb),
-      'Ovos comprados! Agora vamos chocar.',
-    );
-    if (!bought) {
-      setPhase('idle');
-      return;
+    let bought: Awaited<ReturnType<typeof buyEggs>> | null = null;
+    try {
+      bought = await run(
+        quantity > 1 ? `Comprando ${quantity} ovos` : 'Comprando ovo',
+        (cb) => buyEggs(quantity, shop.price, cb),
+        'Ovos comprados! Agora vamos chocar.',
+      );
+      if (!bought) return;
+      // Commit-reveal: the speed comes from the hash of the purchase block, so hatch in a later one.
+      setPhase('incubating');
+      await waitForBlockAfter(bought.blockNumber);
+    } finally {
+      if (!bought) setPhase('idle');
     }
-    // Commit-reveal: the speed comes from the hash of the purchase block, so hatch in a later one.
-    setPhase('incubating');
-    await waitForBlockAfter(bought.blockNumber);
     await hatch(bought.eggIds);
   };
 
+  const handleHatchPending = () => {
+    const pendingIds = new Set(pendingEggs.map((e) => e.id));
+    return hatch([...pendingIds].slice(0, 50));
+  };
+
   const handleStakeResults = async () => {
-    if (!results) return;
+    if (!results?.length) return;
     setStakingResults(true);
     const ok = await run('Stake dos novos NFTs', (cb) => stakeNfts(results.map((r) => r.tokenId), cb), 'NFTs farmando!');
     setStakingResults(false);
@@ -86,11 +110,10 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
     if (ok) onGoToDashboard();
   };
 
-  const hatchWindow = shop?.hatchWindow ?? 256;
   const eggStatus = (egg: EggItem) => {
     if (blockNumber === null) return { expired: false, label: '…' };
     const blocksLeft = egg.commitBlock + hatchWindow - blockNumber;
-    if (blocksLeft <= 0) return { expired: true, label: 'Expirado: nasce com velocidade mínima (10)' };
+    if (blocksLeft <= 0) return { expired: true, label: 'Prazo esgotado: nasce com velocidade mínima (10)' };
     return { expired: false, label: `Choque em até ~${formatDuration(blocksLeft * BLOCK_TIME_SECONDS)}` };
   };
 
@@ -120,7 +143,7 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
               </ul>
             </div>
             <button
-              onClick={() => hatch(pendingEggs.slice(0, 50).map((e) => e.id))}
+              onClick={handleHatchPending}
               className="shrink-0 rounded-xl bg-yellow-500 px-5 py-3 font-bold text-black transition-colors hover:bg-yellow-400"
             >
               Chocar agora
@@ -132,7 +155,7 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
       <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-[1fr_340px]">
         <div className="flex flex-col items-center gap-8">
           <AnimatePresence mode="wait">
-            {results && !busy ? (
+            {results && results.length > 0 && !busy ? (
               <motion.div
                 key="results"
                 initial={{ opacity: 0, scale: 0.9 }}
@@ -279,7 +302,18 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
                 : `Comprar ${quantity > 1 ? `${quantity} ovos` : 'ovo'} (${shop ? formatNumber(Number(formatEther(total)), 4) : '…'} ${CHAIN.currency})`}
             </button>
             <p className="mt-3 text-center text-xs text-gray-500">
-              São duas confirmações: a compra e, um bloco depois, a chocagem.
+              São duas confirmações na carteira: a compra e, um bloco depois, a chocagem.
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-100/80">
+            <p className="flex items-start gap-2">
+              <Timer className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+              <span>
+                <b className="text-amber-200">Prazo de chocagem: ~{hatchDeadline}</b> ({hatchWindow} blocos) após a compra. O site choca
+                automaticamente; se você fechar a aba, volte aqui ou use "Chocar agora". Um ovo chocado depois do prazo nasce com a
+                velocidade mínima (10), então esperar nunca compensa.
+              </span>
             </p>
           </div>
 
@@ -302,15 +336,14 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
             </ul>
             <p className="mt-4 flex gap-2 text-xs text-gray-500">
               <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" />
-              Sorteio justo: a velocidade vem do hash do bloco da compra, que ainda não existia quando você pagou.
-              Ninguém consegue escolher o resultado.
+              Sorteio em duas etapas: a velocidade vem do hash do bloco da compra, que ainda não existia quando você pagou. Nenhum
+              comprador consegue prever, escolher ou repetir o resultado.
             </p>
           </div>
 
           {shop && (
             <p className="text-center text-xs text-gray-500">
-              {shop.eggsSold} ovos vendidos · {shop.totalMinted} NFTs nascidos ·{' '}
-              {rarityOf(100).label} a partir de 90 SPD
+              {shop.eggsSold} ovos vendidos · {shop.totalMinted} NFTs nascidos
             </p>
           )}
         </aside>

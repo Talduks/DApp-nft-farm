@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { Coins, Egg, Gauge, Layers, Loader2, TrendingUp, Zap } from 'lucide-react';
+import { Coins, Egg, Gauge, Layers, Loader2, PauseCircle, TrendingUp, Zap } from 'lucide-react';
 import { TOKEN_SYMBOL } from '../config';
 import { useTx } from '../hooks/useTx';
 import { formatToken } from '../lib/format';
 import { logRewardClaim } from '../services/activity';
 import { claimRewards, stakeNfts, withdrawNfts, type FarmData, type NftItem } from '../web3/farm';
 import NftCard from './NftCard';
+import { useToast } from './ui/Toaster';
 
 interface DashboardProps {
   uid: string;
@@ -16,6 +17,9 @@ interface DashboardProps {
   refresh: () => Promise<void>;
   onGoToEggs: () => void;
 }
+
+/** Below this (1e-6 DAPPF) the amount renders as zero, so claiming would only burn gas. */
+const DUST = 10n ** 12n;
 
 /** Pending rewards extrapolated in real time from the last on-chain snapshot. */
 function useLiveRewards(data: FarmData | null): bigint {
@@ -63,7 +67,9 @@ function useSelection(items: NftItem[]) {
 
 const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: DashboardProps) => {
   const run = useTx();
+  const toast = useToast();
   const live = useLiveRewards(data);
+  const paused = data?.paused ?? false;
   const [busy, setBusy] = useState<'stake' | 'withdraw' | 'claim' | null>(null);
 
   const walletNfts = useMemo(() => data?.walletNfts ?? [], [data]);
@@ -83,14 +89,21 @@ const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: Dashboa
 
   const handleWithdraw = async (ids: number[]) => {
     setBusy('withdraw');
-    const result = await run(
-      `Saque de ${ids.length} NFT${ids.length > 1 ? 's' : ''}`,
-      (cb) => withdrawNfts(ids, cb),
-      'NFTs devolvidos e recompensas resgatadas.',
-    );
+    const result = await run(`Saque de ${ids.length} NFT${ids.length > 1 ? 's' : ''}`, (cb) => withdrawNfts(ids, cb), 'NFTs devolvidos.');
     if (result) {
       staked.clear();
       void logRewardClaim(uid, account, result.claimed, result.hash);
+      if (result.deferred > 0n) {
+        toast.show({
+          type: 'info',
+          title: 'Recompensas continuam pendentes',
+          message: `${formatToken(result.deferred, 4)} ${TOKEN_SYMBOL} ficaram registrados para você${
+            data?.paused ? ' porque o farm está pausado' : ''
+          }. Use "Resgatar" quando o farm voltar a pagar.`,
+        });
+      } else if (result.claimed > 0n) {
+        toast.show({ type: 'success', title: 'Recompensas resgatadas', message: `${formatToken(result.claimed, 4)} ${TOKEN_SYMBOL} enviados para sua carteira.` });
+      }
     }
     await refresh();
     setBusy(null);
@@ -114,6 +127,16 @@ const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: Dashboa
 
   return (
     <div className="flex w-full flex-col gap-6 sm:gap-8">
+      {paused && (
+        <div className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100" role="status">
+          <PauseCircle className="h-5 w-5 shrink-0 text-amber-400" />
+          <p>
+            O farm está <b>pausado</b> pelo administrador: novos stakes e resgates de recompensa estão suspensos. Você pode sacar seus
+            NFTs a qualquer momento; as recompensas ficam registradas e continuam acumulando.
+          </p>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <StatCard icon={<Coins size={14} className="text-yellow-500" />} label={`Saldo ${TOKEN_SYMBOL}`}>
           {formatToken(data.tokenBalance, 2)}
@@ -133,12 +156,13 @@ const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: Dashboa
         <div>
           <p className="mb-1 text-xs font-bold tracking-wider text-purple-300 uppercase">Recompensas pendentes</p>
           <p className="bg-gradient-to-r from-purple-300 to-pink-300 bg-clip-text font-mono text-3xl font-black text-transparent tabular-nums sm:text-4xl">
-            {formatToken(live, 6)} <span className="text-lg">{TOKEN_SYMBOL}</span>
+            {live > 0n && live < DUST ? '< 0,000001' : formatToken(live, 6)} <span className="text-lg">{TOKEN_SYMBOL}</span>
           </p>
         </div>
         <button
           onClick={handleClaim}
-          disabled={busy !== null || live === 0n}
+          disabled={busy !== null || live < DUST || paused}
+          title={paused ? 'Resgates suspensos enquanto o farm estiver pausado' : undefined}
           className="flex w-full items-center justify-center gap-2 rounded-xl bg-white px-6 py-3 text-sm font-bold text-purple-900 shadow-lg transition-all hover:bg-purple-50 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
         >
           {busy === 'claim' && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -168,16 +192,16 @@ const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: Dashboa
               <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400">{walletNfts.length}</span>
             </h3>
             {walletNfts.length > 0 && (
-              <div className="flex gap-2">
+              <div className="flex gap-2" title={paused ? 'Novos stakes suspensos enquanto o farm estiver pausado' : undefined}>
                 <button
-                  disabled={busy !== null || wallet.selected.size === 0}
+                  disabled={busy !== null || paused || wallet.selected.size === 0}
                   onClick={() => handleStake([...wallet.selected])}
                   className="rounded-full bg-blue-600 px-4 py-1.5 text-xs font-bold text-white transition-colors hover:bg-blue-500 disabled:opacity-40"
                 >
                   Stake ({wallet.selected.size})
                 </button>
                 <button
-                  disabled={busy !== null}
+                  disabled={busy !== null || paused}
                   onClick={() => handleStake(walletNfts.map((n) => n.id))}
                   className="rounded-full bg-white/10 px-4 py-1.5 text-xs font-bold text-white transition-colors hover:bg-white/20 disabled:opacity-40"
                 >
@@ -266,7 +290,7 @@ const Dashboard = ({ uid, account, data, loading, refresh, onGoToEggs }: Dashboa
 
       <p className="text-center text-xs text-gray-500">
         {loading ? 'Atualizando…' : 'Os dados são atualizados automaticamente a cada 15 segundos.'} Sacar NFTs também
-        resgata as recompensas acumuladas.
+        resgata as recompensas acumuladas{paused ? ' (quando o farm não estiver pausado)' : ''}.
       </p>
     </div>
   );

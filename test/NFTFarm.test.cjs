@@ -130,14 +130,16 @@ describe("NFTFarm", function () {
             );
         });
 
-        it("still returns NFTs while paused and keeps rewards owed", async function () {
+        it("still returns NFTs while paused, keeps rewards owed and signals RewardDeferred", async function () {
             const { farm, nft, token, owner, alice, ids } = await loadFixture(stakedFixture);
             await time.increase(100);
             await farm.connect(owner).pause();
             await expect(farm.connect(alice).stake([ids[0]])).to.be.revertedWithCustomError(farm, "EnforcedPause");
             await expect(farm.connect(alice).claimAll()).to.be.revertedWithCustomError(farm, "EnforcedPause");
 
-            await farm.connect(alice).withdraw(ids);
+            await expect(farm.connect(alice).withdraw(ids))
+                .to.emit(farm, "RewardDeferred")
+                .withArgs(alice.address, (v) => v > 0n, await farm.DEFER_PAUSED());
             expect(await nft.balanceOf(alice.address)).to.equal(2);
             expect(await token.balanceOf(alice.address)).to.equal(0);
             const owed = await farm.pendingRewards(alice.address);
@@ -148,14 +150,67 @@ describe("NFTFarm", function () {
             expect(await token.balanceOf(alice.address)).to.equal(owed);
         });
 
-        it("emergencyWithdraw works even if the farm lost its minter role", async function () {
+        it("never reverts because of the token: a revoked minter role defers the reward", async function () {
             const { farm, nft, token, owner, alice, ids, MINTER_ROLE } = await loadFixture(stakedFixture);
             await time.increase(100);
             await token.connect(owner).revokeRole(MINTER_ROLE, await farm.getAddress());
-            await expect(farm.connect(alice).withdraw(ids)).to.be.reverted;
-            await farm.connect(alice).emergencyWithdraw(ids);
+
+            await expect(farm.connect(alice).withdraw([ids[0]]))
+                .to.emit(farm, "RewardDeferred")
+                .withArgs(alice.address, (v) => v > 0n, await farm.DEFER_MINT_FAILED());
+            expect(await nft.ownerOf(ids[0])).to.equal(alice.address);
+            const owed = await farm.pendingRewards(alice.address);
+            expect(owed).to.be.gt(0);
+            await expect(farm.connect(alice).claimAll()).to.be.revertedWithCustomError(farm, "RewardMintFailed");
+
+            await token.connect(owner).grantRole(MINTER_ROLE, await farm.getAddress());
+            await farm.connect(alice).claimAll();
+            expect(await token.balanceOf(alice.address)).to.be.gte(owed);
+            expect(await farm.pendingRewards(alice.address)).to.be.lte(50n * REWARD_RATE);
+        });
+
+        it("emergencyWithdraw skips the token entirely", async function () {
+            const { farm, nft, alice, ids } = await loadFixture(stakedFixture);
+            await time.increase(100);
+            await expect(farm.connect(alice).emergencyWithdraw(ids)).to.not.emit(farm, "RewardClaimed");
             expect(await nft.balanceOf(alice.address)).to.equal(2);
             expect(await farm.pendingRewards(alice.address)).to.be.gt(0);
+        });
+
+        it("keeps the token list consistent when withdrawing from the middle of a batch", async function () {
+            const { farm, nft, owner, alice } = await loadFixture(deployFixture);
+            const ids = await mintSpeeds(nft, owner, alice, [10, 20, 30]);
+            await nft.connect(alice).setApprovalForAll(await farm.getAddress(), true);
+            await farm.connect(alice).stake(ids);
+            await farm.connect(alice).withdraw([ids[1]]);
+            const remaining = (await farm.getStakedTokens(alice.address)).map(Number).sort();
+            expect(remaining).to.deep.equal([Number(ids[0]), Number(ids[2])]);
+            expect((await farm.users(alice.address)).speed).to.equal(40);
+            await farm.connect(alice).withdraw([ids[0], ids[2]]);
+            expect(await farm.getStakedTokens(alice.address)).to.deep.equal([]);
+            expect(await farm.totalSpeedStaked()).to.equal(0);
+        });
+    });
+
+    describe("admin", function () {
+        it("rejects duplicated ids in a stake batch", async function () {
+            const { farm, nft, owner, alice } = await loadFixture(deployFixture);
+            const [id] = await mintSpeeds(nft, owner, alice, [20]);
+            await nft.connect(alice).setApprovalForAll(await farm.getAddress(), true);
+            await expect(farm.connect(alice).stake([id, id])).to.be.revertedWithCustomError(nft, "ERC721IncorrectOwner");
+        });
+
+        it("stops accruing when the rate is set to zero", async function () {
+            const { farm, owner, alice } = await loadFixture(stakedFixture);
+            await farm.connect(owner).setRewardRate(0);
+            const frozen = await farm.pendingRewards(alice.address);
+            await time.increase(1000);
+            expect(await farm.pendingRewards(alice.address)).to.equal(frozen);
+        });
+
+        it("cannot be renounced", async function () {
+            const { farm } = await loadFixture(deployFixture);
+            await expect(farm.renounceOwnership()).to.be.revertedWithCustomError(farm, "RenounceDisabled");
         });
     });
 
@@ -176,11 +231,20 @@ describe("NFTFarm", function () {
             // 100 speed * 1e14 = 0.01 token/s -> 1 token after 100s; wait long enough to exceed the cap
             await time.increase(1000);
 
-            await farm.connect(alice).withdraw([id]);
+            await expect(farm.connect(alice).withdraw([id]))
+                .to.emit(farm, "RewardClaimed")
+                .withArgs(alice.address, cap)
+                .and.to.emit(farm, "RewardDeferred")
+                .withArgs(alice.address, (v) => v > 0n, await farm.DEFER_SUPPLY_EXHAUSTED());
             expect(await nft.ownerOf(id)).to.equal(alice.address);
             expect(await mock.balanceOf(alice.address)).to.equal(cap);
-            const [, , , pending] = await farm.getUserInfo(alice.address);
+            const [, , , pending, rewardPerSecond] = await farm.getUserInfo(alice.address);
             expect(pending).to.be.gt(0);
+            expect(rewardPerSecond).to.equal(0);
+            expect(await farm.remainingMintable()).to.equal(0);
+            await expect(farm.connect(alice).claimAll())
+                .to.be.revertedWithCustomError(farm, "SupplyExhausted")
+                .withArgs(pending);
         });
     });
 

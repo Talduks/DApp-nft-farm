@@ -68,6 +68,7 @@ contract TokenStaking is Ownable2Step, Pausable, ReentrancyGuard {
     error StillLocked(uint256 stakeId, uint256 endTime);
     error InsufficientRewardPool(uint256 required, uint256 available);
     error CannotRecoverStakingToken();
+    error RenounceDisabled();
 
     constructor(address stakingToken_, address initialOwner) Ownable(initialOwner) {
         if (stakingToken_ == address(0)) revert ZeroAddress();
@@ -153,6 +154,11 @@ contract TokenStaking is Ownable2Step, Pausable, ReentrancyGuard {
         if (token == address(stakingToken)) revert CannotRecoverStakingToken();
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
+    }
+
+    /// @dev An ownerless contract could never be unpaused or funded by plan changes; transfer instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ------------------------------------------------------------------

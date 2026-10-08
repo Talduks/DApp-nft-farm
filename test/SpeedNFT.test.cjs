@@ -192,12 +192,31 @@ describe("SpeedNFT", function () {
             );
         });
 
-        it("uses two-step ownership transfers", async function () {
+        it("uses two-step ownership transfers and cannot be renounced", async function () {
             const { nft, alice, owner } = await loadFixture(deployFixture);
+            await expect(nft.renounceOwnership()).to.be.revertedWithCustomError(nft, "RenounceDisabled");
             await nft.transferOwnership(alice.address);
             expect(await nft.owner()).to.equal(owner.address);
             await nft.connect(alice).acceptOwnership();
             expect(await nft.owner()).to.equal(alice.address);
+        });
+
+        it("lets anyone sweep proceeds, but only to the owner-defined treasury", async function () {
+            const { nft, alice, bob, keeper } = await loadFixture(deployFixture);
+            await nft.connect(alice).buyEggs(2, { value: PRICE * 2n });
+            await expect(nft.connect(keeper).withdrawToTreasury()).to.be.revertedWithCustomError(nft, "TreasuryNotSet");
+            await expect(nft.connect(alice).setTreasury(bob.address)).to.be.revertedWithCustomError(
+                nft,
+                "OwnableUnauthorizedAccount"
+            );
+            await expect(nft.setTreasury(ethers.ZeroAddress)).to.be.revertedWithCustomError(nft, "ZeroAddress");
+            await expect(nft.setTreasury(bob.address)).to.emit(nft, "TreasuryUpdated").withArgs(ethers.ZeroAddress, bob.address);
+
+            await expect(nft.connect(keeper).withdrawToTreasury()).to.changeEtherBalances(
+                [nft, bob, keeper],
+                [-PRICE * 2n, PRICE * 2n, 0n]
+            );
+            await expect(nft.connect(keeper).withdrawToTreasury()).to.be.revertedWithCustomError(nft, "NothingToWithdraw");
         });
     });
 

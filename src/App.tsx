@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
-import { AlertTriangle, Egg, LayoutDashboard, LogOut, Shield, Sprout, TrendingUp, Wallet } from 'lucide-react';
+import { AlertTriangle, Egg, LayoutDashboard, Loader2, LogOut, RefreshCw, Shield, Sprout, TrendingUp, Wallet } from 'lucide-react';
 import AdminPanel from './components/AdminPanel';
 import Auth from './components/Auth';
 import Dashboard from './components/Dashboard';
 import MysteryEgg from './components/MysteryEgg';
 import TokenStaking from './components/TokenStaking';
 import { useToast } from './components/ui/Toaster';
-import { CHAIN, MISSING_CONTRACTS } from './config';
+import { CHAIN, CONFIG_ERRORS, MISSING_CONTRACTS } from './config';
 import { useAsyncData } from './hooks/useAsyncData';
 import { useWallet } from './hooks/useWallet';
 import { shortAddress } from './lib/format';
-import { WalletLinkError, linkWalletToUser, logoutUser } from './services/authService';
+import { WalletLinkError, isUserBanned, linkWalletToUser, logoutUser } from './services/authService';
 import { auth } from './services/firebase';
 import { fetchOwners } from './web3/admin';
 import { parseError } from './web3/errors';
@@ -33,48 +33,59 @@ const NAV: NavItem[] = [
 ];
 const ADMIN_NAV: NavItem = { key: 'admin', label: 'Admin', icon: <Shield size={16} />, activeClass: 'bg-red-600 text-white' };
 
+/** Wallet ↔ account link. The wallet is usable only while `linked`. */
+type LinkState =
+  | { status: 'idle' | 'linking' | 'linked' }
+  | { status: 'error'; message: string; policy: boolean };
+
 function App() {
   const toast = useToast();
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [view, setView] = useState<View>('dashboard');
   const wallet = useWallet();
-  // The wallet the account is allowed to use; null while unlinked or blocked.
-  const [linkedAccount, setLinkedAccount] = useState<string | null>(null);
+  const [link, setLink] = useState<LinkState>({ status: 'idle' });
+  const [linkAttempt, setLinkAttempt] = useState(0);
 
+  // Gate the signed-in UI on the ban check, not on the raw auth state, so a banned login never
+  // flashes the dashboard and the message isn't lost when <Auth /> remounts.
   useEffect(() => {
-    return onAuthStateChanged(auth, (current) => {
-      setUser(current);
+    return onAuthStateChanged(auth, async (current) => {
+      if (current && (await isUserBanned(current.uid).catch(() => false))) {
+        await logoutUser();
+        toast.show({ type: 'error', title: 'Conta banida', message: 'Esta conta foi banida pelo administrador.' });
+        setUser(null);
+      } else {
+        setUser(current);
+      }
       setAuthLoading(false);
     });
-  }, []);
+  }, [toast]);
 
-  // Link (or re-validate) the wallet whenever the user or the wallet account changes.
+  // (Re)validate the link whenever the user or the wallet account changes. Switching accounts
+  // drops to 'linking' immediately, so wallet A's data is never shown while wallet B signs.
   useEffect(() => {
     if (!user || !wallet.account) {
-      setLinkedAccount(null);
+      setLink({ status: 'idle' });
       return;
     }
     let cancelled = false;
+    setLink({ status: 'linking' });
     linkWalletToUser(user.uid, wallet.account)
       .then(() => {
-        if (!cancelled) setLinkedAccount(wallet.account);
+        if (!cancelled) setLink({ status: 'linked' });
       })
       .catch((error) => {
         if (cancelled) return;
-        setLinkedAccount(null);
-        toast.show({
-          type: 'error',
-          title: 'Carteira não vinculada',
-          message: error instanceof WalletLinkError ? error.message : parseError(error),
-        });
+        const policy = error instanceof WalletLinkError;
+        setLink({ status: 'error', message: policy ? error.message : parseError(error), policy });
       });
     return () => {
       cancelled = true;
     };
-  }, [user, wallet.account, toast]);
+  }, [user, wallet.account, linkAttempt]);
 
-  const active = wallet.wrongNetwork ? null : linkedAccount;
+  const active = link.status === 'linked' && !wallet.wrongNetwork ? wallet.account : null;
   const farm = useAsyncData(active, fetchFarmData, 15_000);
   const owners = useAsyncData(active ? 'owners' : null, () => fetchOwners(), 120_000);
   const isOwner = Boolean(
@@ -110,6 +121,73 @@ function App() {
   if (!user) return <Auth />;
 
   const navItems = isOwner ? [...NAV, ADMIN_NAV] : NAV;
+  const configErrors = [
+    ...CONFIG_ERRORS,
+    ...(MISSING_CONTRACTS.length
+      ? [`Endereços de contrato não configurados: ${MISSING_CONTRACTS.join(', ')} (variáveis VITE_*_ADDRESS em .env.local).`]
+      : []),
+  ];
+
+  const renderGate = () => {
+    if (!wallet.hasWallet) {
+      return (
+        <>
+          <p className="max-w-md text-sm text-slate-400 sm:text-lg">
+            Nenhuma carteira detectada. Instale a MetaMask ou abra este site pelo navegador da sua carteira.
+          </p>
+          <a
+            href="https://metamask.io/download/"
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl transition-transform hover:scale-105"
+          >
+            Instalar MetaMask
+          </a>
+        </>
+      );
+    }
+    if (!wallet.account) {
+      return (
+        <>
+          <p className="max-w-md text-sm text-slate-400 sm:text-lg">
+            Conecte sua carteira na rede {CHAIN.name} para chocar ovos, farmar e fazer staking.
+          </p>
+          <button
+            onClick={handleConnect}
+            disabled={wallet.connecting}
+            className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl shadow-purple-500/20 transition-transform hover:scale-105 disabled:opacity-60"
+          >
+            {wallet.connecting ? 'Conectando…' : 'Conectar carteira'}
+          </button>
+        </>
+      );
+    }
+    if (wallet.wrongNetwork) {
+      return <p className="max-w-md text-sm text-slate-400 sm:text-lg">Troque a rede da carteira para {CHAIN.name} no aviso acima.</p>;
+    }
+    if (link.status === 'error') {
+      return (
+        <>
+          <div className="max-w-md rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200" role="alert">
+            <p className="font-bold">Carteira {shortAddress(wallet.account)} não pôde ser vinculada</p>
+            <p className="mt-1">{link.message}</p>
+            {link.policy && <p className="mt-2 text-xs text-red-300/80">Troque de conta na sua carteira para usar outro endereço.</p>}
+          </div>
+          <button
+            onClick={() => setLinkAttempt((n) => n + 1)}
+            className="flex items-center gap-2 rounded-full bg-white px-6 py-3 font-bold text-slate-900 shadow-xl transition-transform hover:scale-105"
+          >
+            <RefreshCw className="h-4 w-4" /> Tentar novamente
+          </button>
+        </>
+      );
+    }
+    return (
+      <p className="flex items-center gap-2 text-sm text-slate-400 sm:text-lg">
+        <Loader2 className="h-5 w-5 animate-spin" /> Vinculando a carteira {shortAddress(wallet.account)} à sua conta…
+      </p>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 font-sans text-white selection:bg-purple-500/30">
@@ -148,19 +226,19 @@ function App() {
             {wallet.account ? (
               <div
                 className={`flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-bold sm:text-sm ${
-                  wallet.wrongNetwork
-                    ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-                    : 'border-white/10 bg-white/5 text-white'
+                  active
+                    ? 'border-white/10 bg-white/5 text-white'
+                    : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
                 }`}
                 title={wallet.account}
               >
-                <span className={`h-2 w-2 rounded-full ${wallet.wrongNetwork ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                <span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`} />
                 <span className="font-mono">{shortAddress(wallet.account)}</span>
               </div>
             ) : (
               <button
                 onClick={handleConnect}
-                disabled={wallet.connecting}
+                disabled={wallet.connecting || !wallet.hasWallet}
                 className="flex items-center gap-2 rounded-full bg-gradient-to-r from-purple-600 to-blue-600 px-4 py-2 text-xs font-bold text-white shadow-lg transition-all hover:shadow-purple-500/50 disabled:opacity-60 sm:px-6 sm:py-3 sm:text-sm"
               >
                 <Wallet size={18} />
@@ -180,14 +258,14 @@ function App() {
       </nav>
 
       <main className="mx-auto max-w-7xl px-3 py-4 pb-24 sm:px-4 sm:py-8 md:pb-8">
-        {MISSING_CONTRACTS.length > 0 && (
-          <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+        {configErrors.length > 0 && (
+          <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200" role="alert">
             <AlertTriangle className="h-5 w-5 shrink-0 text-red-400" />
-            <p>
-              Endereços de contrato não configurados: <b>{MISSING_CONTRACTS.join(', ')}</b>. Defina as variáveis{' '}
-              <code className="rounded bg-black/30 px-1">VITE_*_ADDRESS</code> em <code className="rounded bg-black/30 px-1">.env.local</code> (veja o
-              README).
-            </p>
+            <ul className="space-y-1">
+              {configErrors.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -198,7 +276,9 @@ function App() {
               Sua carteira está em outra rede. Este app funciona na <b>{CHAIN.name}</b>.
             </p>
             <button
-              onClick={() => wallet.changeNetwork().catch((e) => toast.show({ type: 'error', title: 'Erro ao trocar de rede', message: parseError(e) }))}
+              onClick={() =>
+                wallet.changeNetwork().catch((e) => toast.show({ type: 'error', title: 'Erro ao trocar de rede', message: parseError(e) }))
+              }
               className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-black hover:bg-amber-400"
             >
               Trocar para {CHAIN.name}
@@ -214,31 +294,7 @@ function App() {
             <h1 className="bg-gradient-to-b from-white to-slate-400 bg-clip-text text-3xl font-bold text-transparent sm:text-4xl md:text-6xl">
               Olá, {user.displayName ?? 'farmer'}
             </h1>
-            <p className="max-w-md text-sm text-slate-400 sm:text-lg">
-              {wallet.hasWallet
-                ? `Conecte sua carteira na rede ${CHAIN.name} para chocar ovos, farmar e fazer staking.`
-                : 'Nenhuma carteira detectada. Instale a MetaMask ou abra este site pelo navegador da sua carteira.'}
-            </p>
-            {wallet.hasWallet ? (
-              !wallet.account && (
-                <button
-                  onClick={handleConnect}
-                  disabled={wallet.connecting}
-                  className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl shadow-purple-500/20 transition-transform hover:scale-105 disabled:opacity-60"
-                >
-                  {wallet.connecting ? 'Conectando…' : 'Conectar carteira'}
-                </button>
-              )
-            ) : (
-              <a
-                href="https://metamask.io/download/"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl transition-transform hover:scale-105"
-              >
-                Instalar MetaMask
-              </a>
-            )}
+            {renderGate()}
           </div>
         ) : view === 'dashboard' ? (
           <Dashboard

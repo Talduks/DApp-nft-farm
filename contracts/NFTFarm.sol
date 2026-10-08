@@ -26,9 +26,9 @@ interface ISpeedNFT is IERC721 {
  *  - stake / withdraw / claim are O(1) per user regardless of how many NFTs they hold,
  *  - stake, withdraw and claim work in batches (one signature instead of one per NFT).
  *
- * Users can always get their NFTs back: `withdraw` keeps working while paused (rewards stay
- * owed), and `emergencyWithdraw` never touches the reward token, so a revoked minter role or a
- * reached MAX_SUPPLY can't lock NFTs in the farm.
+ * Users can always get their NFTs back: `withdraw` never reverts because of the reward token
+ * (paused farm, MAX_SUPPLY reached or a revoked minter role keep the reward owed and emit
+ * `RewardDeferred` instead), and `emergencyWithdraw` skips the token entirely.
  */
 contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
     struct UserInfo {
@@ -40,6 +40,10 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Upper bound for `rewardRate` to prevent fat-finger configuration.
     uint256 public constant MAX_REWARD_RATE = 1e16;
     uint256 public constant MAX_BATCH = 50;
+
+    bytes32 public constant DEFER_PAUSED = "PAUSED";
+    bytes32 public constant DEFER_SUPPLY_EXHAUSTED = "SUPPLY_EXHAUSTED";
+    bytes32 public constant DEFER_MINT_FAILED = "MINT_FAILED";
 
     IMintableToken public immutable rewardToken;
     ISpeedNFT public immutable nftCollection;
@@ -60,6 +64,8 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
     event Staked(address indexed user, uint256 indexed tokenId, uint256 speed);
     event Withdrawn(address indexed user, uint256 indexed tokenId);
     event RewardClaimed(address indexed user, uint256 reward);
+    /// @notice Emitted when rewards stay owed instead of being paid; `reason` is one of DEFER_*.
+    event RewardDeferred(address indexed user, uint256 amount, bytes32 indexed reason);
     event RewardRateUpdated(uint256 oldRate, uint256 newRate);
     event NFTRecovered(address indexed collection, uint256 indexed tokenId, address indexed to);
 
@@ -70,7 +76,10 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
     error ZeroSpeed(uint256 tokenId);
     error RateTooHigh(uint256 rate, uint256 max);
     error NothingToClaim();
+    error SupplyExhausted(uint256 owed);
+    error RewardMintFailed(uint256 owed);
     error CannotRecoverStaked(uint256 tokenId);
+    error RenounceDisabled();
 
     constructor(address rewardToken_, address nftCollection_, uint256 rewardRate_, address initialOwner)
         Ownable(initialOwner)
@@ -115,21 +124,34 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         totalStaked += tokenIds.length;
     }
 
-    /// @notice Unstake NFTs and claim rewards. While paused, NFTs are returned and rewards stay owed.
+    /**
+     * @notice Unstake NFTs and claim rewards. Rewards that can't be paid right now (farm paused,
+     *         supply cap, minter role revoked) stay owed and `RewardDeferred` is emitted; the
+     *         NFTs always come back.
+     */
     function withdraw(uint256[] calldata tokenIds) external nonReentrant {
         _unstake(msg.sender, tokenIds);
-        if (!paused()) _payOwed(msg.sender);
+        if (paused()) {
+            uint256 owed = users[msg.sender].owed;
+            if (owed > 0) emit RewardDeferred(msg.sender, owed, DEFER_PAUSED);
+        } else {
+            _payOwed(msg.sender);
+        }
     }
 
-    /// @notice Unstake NFTs without calling the reward token. Rewards stay owed and can be
-    ///         claimed later with `claimAll`.
+    /// @notice Unstake NFTs without touching the reward token. Rewards stay owed for `claimAll`.
     function emergencyWithdraw(uint256[] calldata tokenIds) external nonReentrant {
         _unstake(msg.sender, tokenIds);
     }
 
     function claimAll() external whenNotPaused nonReentrant {
-        _harvest(msg.sender);
-        if (_payOwed(msg.sender) == 0) revert NothingToClaim();
+        UserInfo storage user = _harvest(msg.sender);
+        uint256 owed = user.owed;
+        if (owed == 0) revert NothingToClaim();
+        if (_payOwed(msg.sender) == 0) {
+            if (_mintable() == 0) revert SupplyExhausted(owed);
+            revert RewardMintFailed(owed);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -165,6 +187,11 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         emit NFTRecovered(collection, tokenId, to);
     }
 
+    /// @dev An ownerless farm could never be unpaused; transfer ownership instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
+    }
+
     // ------------------------------------------------------------------
     // Views
     // ------------------------------------------------------------------
@@ -178,7 +205,13 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         return _userTokens[account];
     }
 
-    /// @notice Everything the dashboard needs about a user, in one call.
+    /// @notice DAPPF that can still be minted before the token's MAX_SUPPLY.
+    function remainingMintable() external view returns (uint256) {
+        return _mintable();
+    }
+
+    /// @notice Everything the dashboard needs about a user, in one call. `rewardPerSecond` is 0
+    ///         once the token supply is exhausted, since nothing more can ever be paid.
     function getUserInfo(address account)
         external
         view
@@ -197,7 +230,7 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         }
         totalSpeed = users[account].speed;
         pending = pendingRewards(account);
-        rewardPerSecond = totalSpeed * rewardRate;
+        rewardPerSecond = _mintable() == 0 ? 0 : totalSpeed * rewardRate;
     }
 
     // ------------------------------------------------------------------
@@ -238,20 +271,37 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @dev Pays what is owed, capped by the token's remaining mintable supply so claims and
-    ///      withdrawals never revert because MAX_SUPPLY was reached.
+    /**
+     * @dev Pays what is owed, capped by the token's remaining mintable supply. Never reverts
+     *      because of the token: a failed mint leaves the full amount owed. Returns the amount paid.
+     */
     function _payOwed(address account) private returns (uint256 paid) {
         UserInfo storage user = users[account];
         uint256 owed = user.owed;
         if (owed == 0) return 0;
 
-        uint256 mintable = rewardToken.MAX_SUPPLY() - rewardToken.totalSupply();
+        uint256 mintable = _mintable();
         paid = owed < mintable ? owed : mintable;
-        if (paid == 0) return 0;
+        if (paid == 0) {
+            emit RewardDeferred(account, owed, DEFER_SUPPLY_EXHAUSTED);
+            return 0;
+        }
 
         user.owed = owed - paid;
-        rewardToken.mint(account, paid);
-        emit RewardClaimed(account, paid);
+        try rewardToken.mint(account, paid) {
+            emit RewardClaimed(account, paid);
+            if (paid < owed) emit RewardDeferred(account, owed - paid, DEFER_SUPPLY_EXHAUSTED);
+        } catch {
+            user.owed = owed;
+            emit RewardDeferred(account, owed, DEFER_MINT_FAILED);
+            return 0;
+        }
+    }
+
+    function _mintable() private view returns (uint256) {
+        uint256 maxSupply = rewardToken.MAX_SUPPLY();
+        uint256 supply = rewardToken.totalSupply();
+        return supply >= maxSupply ? 0 : maxSupply - supply;
     }
 
     function _updatePool() private {

@@ -11,6 +11,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
   type Timestamp,
 } from 'firebase/firestore';
@@ -155,11 +156,15 @@ export async function getEggHistory(max = 100): Promise<EggMintRecord[]> {
   return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<EggMintRecord, 'id'>) }));
 }
 
+/**
+ * Bans or unbans an account together with every wallet indexed to it. The wallet documents are
+ * looked up by owner, never derived from the profile's free-form `address` field, so a user can't
+ * point the ban at someone else's wallet.
+ */
 export async function setUserBan(user: UserProfile, banned: boolean) {
+  const wallets = await getDocs(query(collection(db, 'wallets'), where('uid', '==', user.uid)));
   const batch = writeBatch(db);
   batch.update(doc(db, 'users', user.uid), { isBanned: banned });
-  if (user.address) {
-    batch.set(doc(db, 'wallets', user.address.toLowerCase()), { uid: user.uid, banned }, { merge: true });
-  }
+  wallets.forEach((wallet) => batch.update(wallet.ref, { banned }));
   await batch.commit();
 }
