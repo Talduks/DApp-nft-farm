@@ -50,7 +50,7 @@ OWNER_ADDRESS=0xSeuMultisig TREASURY_ADDRESS=0xSuaCarteiraFria STAKING_REWARD_PO
 O script:
 
 1. faz o deploy dos quatro contratos;
-2. concede `MINTER_ROLE` do token ao `NFTFarm` (só o farm cunha DAPPF) e define a tesouraria do `SpeedNFT` (`TREASURY_ADDRESS`, senão `OWNER_ADDRESS`, senão o deployer);
+2. concede `MINTER_ROLE` do token ao `NFTFarm` (só o farm cunha DAPPF) e define a tesouraria do `SpeedNFT` (`TREASURY_ADDRESS`; sem ela, o deployer — nunca o `OWNER_ADDRESS` ainda não aceito, porque a varredura é pública e um endereço errado seria um ralo irreversível);
 3. opcionalmente cunha `STAKING_REWARD_POOL` DAPPF para o pool do staking;
 4. se `OWNER_ADDRESS` for informado, **propõe** a transferência de todos os contratos — nada muda até o novo dono chamar `acceptOwnership()` em `SpeedNFT`, `NFTFarm` e `TokenStaking` e `acceptDefaultAdminTransfer()` em `DAppToken`. Um endereço digitado errado simplesmente nunca aceita e o deployer continua no controle;
 5. grava `deployments/<rede>.json` e imprime as variáveis `VITE_*` e os comandos de `hardhat verify`.
@@ -74,7 +74,7 @@ firebase login
 npm run rules:deploy        # usa firebase.json / .firebaserc (projeto dapp-farm)
 ```
 
-As regras garantem, no servidor: um nome de usuário por conta (sem squatting), uma carteira por conta com troca no máximo a cada 7 dias, flags de banimento alteráveis só por admins (inclusive contra `deleteField()`), e logs de atividade apenas do próprio usuário.
+As regras garantem, no servidor: um nome de usuário por conta e uma carteira por conta (ambos amarrados ao próprio perfil, sem squatting de nomes ou de endereços alheios), troca de carteira no máximo a cada 7 dias, flags de banimento alteráveis só por admins (inclusive contra `deleteField()`), índices sem listagem pública, e logs de atividade apenas do próprio usuário.
 
 Para liberar o painel admin para a sua conta, crie o documento `admins/<seu UID>` no console (o UID aparece no painel quando a permissão é negada). Os controles on-chain continuam exigindo que a carteira conectada seja dona do contrato.
 
@@ -95,7 +95,7 @@ Para liberar o painel admin para a sua conta, crie o documento `admins/<seu UID>
 ### NFTFarm
 - Recompensa = `velocidade × rewardRate` por segundo, com acumulador global (`accRewardPerSpeed`): mudar a taxa só afeta o futuro e as operações são O(1) por usuário.
 - `stake`, `withdraw`, `emergencyWithdraw` e `claimAll` em lote (até 50 NFTs por transação).
-- `withdraw` **nunca** reverte por causa do token: farm pausado, supply máximo atingido ou `MINTER_ROLE` revogado devolvem os NFTs, mantêm a recompensa registrada e emitem `RewardDeferred(user, amount, reason)`. `claimAll` diferencia `SupplyExhausted` de `RewardMintFailed`, e `getUserInfo` zera `rewardPerSecond` quando não há mais o que emitir. `emergencyWithdraw` não toca no token.
+- `withdraw` **nunca** reverte por causa do token: farm pausado, supply máximo atingido ou `MINTER_ROLE` revogado devolvem os NFTs, mantêm a recompensa registrada e emitem `RewardDeferred(user, amount, reason)`. `claimAll` diferencia `SupplyExhausted` de `RewardMintFailed`. Quando o supply se esgota, a acumulação congela para todos (nada do que viesse depois poderia ser pago) e `getUserInfo` zera `rewardPerSecond`. `emergencyWithdraw` não toca no token.
 - `rewardRate` limitado a `MAX_REWARD_RATE`; `recoverERC721` devolve NFTs enviados por engano sem poder tocar nos que estão em stake.
 
 ### TokenStaking

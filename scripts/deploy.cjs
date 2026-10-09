@@ -7,7 +7,9 @@
  * Optional environment variables (see .env.example):
  *   FARM_REWARD_RATE      wei per speed unit per second (default 1e14 = 0.0001 DAPPF)
  *   STAKING_REWARD_POOL   DAPPF to mint into the staking reward pool (default 0)
- *   TREASURY_ADDRESS      where `withdrawToTreasury` sends egg sales (default: OWNER_ADDRESS, else deployer)
+ *   TREASURY_ADDRESS      where `withdrawToTreasury` sends egg sales. Defaults to the deployer — never
+ *                         to OWNER_ADDRESS, which has not proven it can sign yet: the sweep is
+ *                         permissionless, so a mistyped treasury would be an irreversible sink.
  *   OWNER_ADDRESS         final owner, ideally a Safe multisig. Every hand-over is two-step: the new
  *                         owner must call acceptOwnership() on SpeedNFT, NFTFarm and TokenStaking and
  *                         acceptDefaultAdminTransfer() on DAppToken.
@@ -32,12 +34,15 @@ async function main() {
     const rewardRate = BigInt(process.env.FARM_REWARD_RATE || "100000000000000");
     const stakingPool = ethers.parseEther(process.env.STAKING_REWARD_POOL || "0");
     const finalOwner = process.env.OWNER_ADDRESS || "";
-    if (finalOwner && !ethers.isAddress(finalOwner)) throw new Error("OWNER_ADDRESS is not a valid address");
+    if (finalOwner && (!ethers.isAddress(finalOwner) || finalOwner === ethers.ZeroAddress)) {
+        throw new Error("OWNER_ADDRESS is not a valid address");
+    }
     if (finalOwner && finalOwner.toLowerCase() === deployer.address.toLowerCase()) {
         throw new Error("OWNER_ADDRESS is the deployer itself; leave it empty to keep the deployer as owner");
     }
-    const treasury = process.env.TREASURY_ADDRESS || finalOwner || deployer.address;
-    if (!ethers.isAddress(treasury)) throw new Error("TREASURY_ADDRESS is not a valid address");
+    const treasury = process.env.TREASURY_ADDRESS || deployer.address;
+    if (!ethers.isAddress(treasury) || treasury === ethers.ZeroAddress) throw new Error("TREASURY_ADDRESS is not a valid address");
+    const treasuryIsDeployer = treasury.toLowerCase() === deployer.address.toLowerCase();
 
     console.log(`Network:  ${network.name} (chainId ${chainId})`);
     console.log(`Deployer: ${deployer.address}`);
@@ -68,7 +73,7 @@ async function main() {
     console.log("\nConfiguring...");
     const MINTER_ROLE = await token.MINTER_ROLE();
     await send(token.grantRole(MINTER_ROLE, await farm.getAddress()), "MINTER_ROLE granted to NFTFarm");
-    await send(nft.setTreasury(treasury), `SpeedNFT treasury set to ${treasury}`);
+    await send(nft.setTreasury(treasury), `SpeedNFT treasury set to ${treasury}${treasuryIsDeployer ? " (the deployer)" : ""}`);
 
     if (stakingPool > 0n) {
         await send(token.grantRole(MINTER_ROLE, deployer.address), "temporary MINTER_ROLE for deployer");
@@ -93,7 +98,12 @@ async function main() {
         console.log("  ⚠ Nothing changes until the new owner accepts. From that address, call:");
         console.log("      acceptOwnership()             on SpeedNFT, NFTFarm and TokenStaking");
         console.log("      acceptDefaultAdminTransfer()  on DAppToken");
+        if (treasuryIsDeployer) {
+            console.log("      setTreasury(<cold wallet>)    on SpeedNFT — egg sales currently sweep to the deployer");
+        }
         console.log("    The deployer keeps control until then, so a wrong address can't lock you out.");
+    } else if (treasuryIsDeployer && !isLocal) {
+        console.log("\n  ⚠ Egg sales sweep to the deployer. Set a cold wallet with SpeedNFT.setTreasury() before launch.");
     }
 
     const deployment = {

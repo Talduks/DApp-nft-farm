@@ -3,6 +3,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   increment,
   limit,
@@ -166,5 +167,11 @@ export async function setUserBan(user: UserProfile, banned: boolean) {
   const batch = writeBatch(db);
   batch.update(doc(db, 'users', user.uid), { isBanned: banned });
   wallets.forEach((wallet) => batch.update(wallet.ref, { banned }));
+  // Profiles from before the wallets index only carry users.address: index that wallet so the
+  // ban reaches it, but never touch a document that already belongs to someone else.
+  if (wallets.empty && user.address) {
+    const legacyRef = doc(db, 'wallets', user.address.toLowerCase());
+    if (!(await getDoc(legacyRef)).exists()) batch.set(legacyRef, { uid: user.uid, banned, linkedAt: serverTimestamp() });
+  }
   await batch.commit();
 }

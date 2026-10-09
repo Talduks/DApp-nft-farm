@@ -79,7 +79,8 @@ service cloud.firestore {
     // is only valid together with the profile that carries the same usernameLower, so an account
     // can't squat names it doesn't use.
     match /usernames/{name} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if isAdmin();
       allow create: if isSelf(request.resource.data.uid)
         && name.matches('^[a-z0-9_]{3,20}$')
         && request.resource.data.keys().hasOnly(['uid'])
@@ -88,13 +89,18 @@ service cloud.firestore {
     }
 
     // Wallet index: one document per lowercase address. A wallet belongs to one account; the ban
-    // flag is admin-only and a banned wallet can't be deleted and recreated by its owner.
+    // flag is admin-only and a banned wallet can't be deleted and recreated by its owner. A user
+    // may only index the wallet their own profile points at (same transaction), so nobody can
+    // reserve other people's addresses. Admins may create entries to ban legacy wallets.
     match /wallets/{address} {
-      allow read: if signedIn();
-      allow create: if isSelf(request.resource.data.uid)
-        && notBanned()
-        && address == address.lower()
-        && request.resource.data.get('banned', false) == false;
+      allow get: if signedIn();
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        || (isSelf(request.resource.data.uid)
+            && notBanned()
+            && address == address.lower()
+            && request.resource.data.get('banned', false) == false
+            && getAfter(profilePath()).data.get('addressLower', getAfter(profilePath()).data.get('address', '').lower()) == address);
       allow update: if isAdmin()
         || (isSelf(resource.data.uid) && untouched(['uid', 'banned']));
       allow delete: if isAdmin()
@@ -108,11 +114,16 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
+    // Stake records are keyed "<wallet>_<stakeId>"; the key must match the record and the wallet
+    // must be linked to the writer, so nobody can pre-empt another user's record ids.
     match /stakes/{id} {
       allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
-      allow create: if isSelf(request.resource.data.uid) && notBanned();
+      allow create: if isSelf(request.resource.data.uid)
+        && notBanned()
+        && id == request.resource.data.wallet.lower() + '_' + string(request.resource.data.stakeId)
+        && walletAfter(request.resource.data.wallet.lower()).data.uid == request.auth.uid;
       allow update: if isAdmin()
-        || (isSelf(resource.data.uid) && untouched(['uid', 'wallet', 'stakeId', 'amount', 'lockMonths', 'endTime']));
+        || (isSelf(resource.data.uid) && notBanned() && untouched(['uid', 'wallet', 'stakeId', 'amount', 'lockMonths', 'endTime']));
       allow delete: if isAdmin();
     }
 

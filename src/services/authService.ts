@@ -87,10 +87,22 @@ export async function registerUser(username: string, password: string) {
   return user;
 }
 
-/** Whether the account is banned. Used by the app shell before rendering any signed-in UI. */
-export async function isUserBanned(uid: string): Promise<boolean> {
-  const profile = await getDoc(doc(db, 'users', uid));
-  return profile.exists() && profile.data().isBanned === true;
+export interface ProfileStatus {
+  exists: boolean;
+  banned: boolean;
+}
+
+/**
+ * Reads the account's profile for the app shell. Right after registration the profile transaction
+ * may still be in flight, so it waits briefly instead of letting the wallet link race it.
+ */
+export async function waitForProfile(uid: string, attempts = 10, delayMs = 500): Promise<ProfileStatus> {
+  for (let i = 0; ; i++) {
+    const profile = await getDoc(doc(db, 'users', uid));
+    if (profile.exists()) return { exists: true, banned: profile.data().isBanned === true };
+    if (i >= attempts - 1) return { exists: false, banned: false };
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 export async function loginUser(username: string, password: string) {

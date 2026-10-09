@@ -13,12 +13,12 @@ import { buyEggs, fetchEggShop, getBlockNumber, hatchEggs, waitForBlockAfter, ty
 import type { EggItem } from '../web3/farm';
 import { stakeNfts } from '../web3/farm';
 import NftCard from './NftCard';
-import { useToast } from './ui/Toaster';
 
 interface MysteryEggProps {
   uid: string;
   account: string;
   pendingEggs: EggItem[];
+  farmPaused: boolean;
   refresh: () => Promise<void>;
   onGoToDashboard: () => void;
 }
@@ -26,10 +26,10 @@ interface MysteryEggProps {
 type Phase = 'idle' | 'buying' | 'incubating' | 'hatching';
 
 const DEFAULT_HATCH_WINDOW = 256;
+const ALREADY_HATCHED_MESSAGE = 'Esses ovos já tinham sido chocados (por um keeper ou outra aba). Confira seus NFTs no dashboard.';
 
-const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: MysteryEggProps) => {
+const MysteryEgg = ({ uid, account, pendingEggs, farmPaused, refresh, onGoToDashboard }: MysteryEggProps) => {
   const run = useTx();
-  const toast = useToast();
   const { data: shop } = useAsyncData('egg-shop', () => fetchEggShop(), 30_000);
   const [quantity, setQuantity] = useState(1);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -57,14 +57,11 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
       const outcome = await run(
         eggIds.length > 1 ? `Chocando ${eggIds.length} ovos` : 'Chocando ovo',
         (cb) => hatchEggs(eggIds, cb),
-        'Seus NFTs nasceram!',
+        // Already-hatched eggs are skipped on-chain (a keeper or another tab got there first), so a
+        // transaction with no EggHatched event is "nothing to do", not a success.
+        (o) => (o.results.length === 0 ? { type: 'info', message: ALREADY_HATCHED_MESSAGE } : 'Seus NFTs nasceram!'),
       );
-      if (!outcome) return false;
-      if (outcome.results.length === 0) {
-        // Someone else (a keeper, another tab) hatched them first; the NFTs are already in the wallet.
-        toast.show({ type: 'info', title: 'Ovos já chocados', message: 'Esses ovos já tinham sido chocados. Confira seus NFTs no dashboard.' });
-        return false;
-      }
+      if (!outcome || outcome.results.length === 0) return false;
       setResults(outcome.results);
       void logEggHatches(uid, account, outcome.results, outcome.hash);
       return true;
@@ -203,11 +200,12 @@ const MysteryEgg = ({ uid, account, pendingEggs, refresh, onGoToDashboard }: Mys
                   </button>
                   <button
                     onClick={handleStakeResults}
-                    disabled={stakingResults}
+                    disabled={stakingResults || farmPaused}
+                    title={farmPaused ? 'Novos stakes suspensos enquanto o farm estiver pausado' : undefined}
                     className="flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-purple-500 disabled:opacity-60"
                   >
                     {stakingResults && <Loader2 className="h-4 w-4 animate-spin" />}
-                    Fazer stake agora
+                    {farmPaused ? 'Farm pausado' : 'Fazer stake agora'}
                   </button>
                 </div>
               </motion.div>

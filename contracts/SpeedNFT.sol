@@ -179,7 +179,11 @@ contract SpeedNFT is ERC721, ERC721Enumerable, Ownable2Step, Pausable, Reentranc
         _withdraw(to);
     }
 
-    /// @notice Sets where `withdrawToTreasury` sends the proceeds (ideally a multisig / cold wallet).
+    /**
+     * @notice Sets where `withdrawToTreasury` sends the proceeds. Because the sweep is permissionless,
+     *         the contract balance is only as safe as this address: use a multisig or cold wallet,
+     *         never a hot key.
+     */
     function setTreasury(address newTreasury) external onlyOwner {
         if (newTreasury == address(0)) revert ZeroAddress();
         emit TreasuryUpdated(treasury, newTreasury);

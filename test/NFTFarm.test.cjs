@@ -216,7 +216,7 @@ describe("NFTFarm", function () {
 
     describe("supply cap", function () {
         it("pays up to the remaining supply and keeps the rest owed", async function () {
-            const { nft, owner, alice } = await loadFixture(deployFixture);
+            const { nft, owner, alice, bob } = await loadFixture(deployFixture);
             const cap = ethers.parseEther("1");
             const mock = await ethers.deployContract("MockCappedToken", [cap]);
             const farm = await ethers.deployContract("NFTFarm", [
@@ -226,8 +226,11 @@ describe("NFTFarm", function () {
                 owner.address,
             ]);
             const [id] = await mintSpeeds(nft, owner, alice, [100]);
+            const [bobId] = await mintSpeeds(nft, owner, bob, [100]);
             await nft.connect(alice).approve(await farm.getAddress(), id);
+            await nft.connect(bob).approve(await farm.getAddress(), bobId);
             await farm.connect(alice).stake([id]);
+            await farm.connect(bob).stake([bobId]);
             // 100 speed * 1e14 = 0.01 token/s -> 1 token after 100s; wait long enough to exceed the cap
             await time.increase(1000);
 
@@ -245,6 +248,15 @@ describe("NFTFarm", function () {
             await expect(farm.connect(alice).claimAll())
                 .to.be.revertedWithCustomError(farm, "SupplyExhausted")
                 .withArgs(pending);
+
+            // Accrual freezes for everyone once nothing more can be minted.
+            const bobPending = await farm.pendingRewards(bob.address);
+            expect(bobPending).to.be.gt(0);
+            await time.increase(1000);
+            expect(await farm.pendingRewards(bob.address)).to.equal(bobPending);
+            await expect(farm.connect(bob).claimAll())
+                .to.be.revertedWithCustomError(farm, "SupplyExhausted")
+                .withArgs(bobPending);
         });
     });
 

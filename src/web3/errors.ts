@@ -63,14 +63,21 @@ export function isUserRejection(error: unknown): boolean {
   return e?.code === 'ACTION_REJECTED' || e?.code === 4001 || e?.info?.error?.code === 4001;
 }
 
+/** Name of the custom error a contract reverted with, when ethers or the RPC exposed its data. */
+export function revertName(error: unknown): string | undefined {
+  const e = error as any;
+  return (
+    e?.revert?.name ?? decodeRevertData(e?.data) ?? decodeRevertData(e?.info?.error?.data?.data) ?? decodeRevertData(e?.info?.error?.data)
+  );
+}
+
 /** Turns wallet, RPC and contract errors into a short message in Portuguese. */
 export function parseError(error: unknown): string {
   const e = error as any;
   if (isUserRejection(e)) return 'Ação cancelada na carteira.';
   if (e?.code === 'INSUFFICIENT_FUNDS') return `Saldo de ${CHAIN.currency} insuficiente para o valor e o gás da transação.`;
 
-  const name: string | undefined =
-    e?.revert?.name ?? decodeRevertData(e?.data) ?? decodeRevertData(e?.info?.error?.data?.data) ?? decodeRevertData(e?.info?.error?.data);
+  const name = revertName(e);
   if (name && MESSAGES[name]) return MESSAGES[name];
 
   if (e?.code === 'CALL_EXCEPTION') return 'A transação foi recusada pelo contrato.';

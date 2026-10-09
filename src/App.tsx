@@ -11,7 +11,7 @@ import { CHAIN, CONFIG_ERRORS, MISSING_CONTRACTS } from './config';
 import { useAsyncData } from './hooks/useAsyncData';
 import { useWallet } from './hooks/useWallet';
 import { shortAddress } from './lib/format';
-import { WalletLinkError, isUserBanned, linkWalletToUser, logoutUser } from './services/authService';
+import { WalletLinkError, linkWalletToUser, logoutUser, waitForProfile } from './services/authService';
 import { auth } from './services/firebase';
 import { fetchOwners } from './web3/admin';
 import { parseError } from './web3/errors';
@@ -33,9 +33,10 @@ const NAV: NavItem[] = [
 ];
 const ADMIN_NAV: NavItem = { key: 'admin', label: 'Admin', icon: <Shield size={16} />, activeClass: 'bg-red-600 text-white' };
 
-/** Wallet ↔ account link. The wallet is usable only while `linked`. */
+/** Wallet ↔ account link. The wallet is usable only while `linked` to the very address in use. */
 type LinkState =
-  | { status: 'idle' | 'linking' | 'linked' }
+  | { status: 'idle' | 'linking' }
+  | { status: 'linked'; account: string }
   | { status: 'error'; message: string; policy: boolean };
 
 function App() {
@@ -47,33 +48,49 @@ function App() {
   const [link, setLink] = useState<LinkState>({ status: 'idle' });
   const [linkAttempt, setLinkAttempt] = useState(0);
 
-  // Gate the signed-in UI on the ban check, not on the raw auth state, so a banned login never
-  // flashes the dashboard and the message isn't lost when <Auth /> remounts.
+  // Gate the signed-in UI on the profile check (exists + not banned), not on the raw auth state:
+  // a banned login never flashes the dashboard, the message isn't lost when <Auth /> remounts,
+  // and a fresh registration can't race the wallet link before its profile exists.
   useEffect(() => {
     return onAuthStateChanged(auth, async (current) => {
-      if (current && (await isUserBanned(current.uid).catch(() => false))) {
-        await logoutUser();
-        toast.show({ type: 'error', title: 'Conta banida', message: 'Esta conta foi banida pelo administrador.' });
-        setUser(null);
-      } else {
-        setUser(current);
+      if (current) {
+        let profile;
+        try {
+          profile = await waitForProfile(current.uid);
+        } catch (error) {
+          console.error(error);
+          toast.show({ type: 'error', title: 'Não foi possível verificar sua conta', message: 'Verifique a conexão e entre novamente.' });
+          setUser(null);
+          setAuthLoading(false);
+          return;
+        }
+        if (profile.banned) {
+          await logoutUser();
+          toast.show({ type: 'error', title: 'Conta banida', message: 'Esta conta foi banida pelo administrador.' });
+          setUser(null);
+          setAuthLoading(false);
+          return;
+        }
       }
+      setUser(current);
       setAuthLoading(false);
     });
   }, [toast]);
 
-  // (Re)validate the link whenever the user or the wallet account changes. Switching accounts
-  // drops to 'linking' immediately, so wallet A's data is never shown while wallet B signs.
+  // (Re)validate the link whenever the user or the wallet account changes. `active` below also
+  // compares the linked address with the one in use, so an account switch never shows wallet A's
+  // data while wallet B signs — not even for one render.
   useEffect(() => {
-    if (!user || !wallet.account) {
+    const account = wallet.account;
+    if (!user || !account) {
       setLink({ status: 'idle' });
       return;
     }
     let cancelled = false;
     setLink({ status: 'linking' });
-    linkWalletToUser(user.uid, wallet.account)
+    linkWalletToUser(user.uid, account)
       .then(() => {
-        if (!cancelled) setLink({ status: 'linked' });
+        if (!cancelled) setLink({ status: 'linked', account });
       })
       .catch((error) => {
         if (cancelled) return;
@@ -85,7 +102,7 @@ function App() {
     };
   }, [user, wallet.account, linkAttempt]);
 
-  const active = link.status === 'linked' && !wallet.wrongNetwork ? wallet.account : null;
+  const active = link.status === 'linked' && link.account === wallet.account && !wallet.wrongNetwork ? link.account : null;
   const farm = useAsyncData(active, fetchFarmData, 15_000);
   const owners = useAsyncData(active ? 'owners' : null, () => fetchOwners(), 120_000);
   const isOwner = Boolean(
@@ -312,6 +329,7 @@ function App() {
             uid={user.uid}
             account={active}
             pendingEggs={farm.data?.pendingEggs ?? []}
+            farmPaused={farm.data?.paused ?? false}
             refresh={farm.refresh}
             onGoToDashboard={() => setView('dashboard')}
           />

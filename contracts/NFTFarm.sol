@@ -311,8 +311,10 @@ contract NFTFarm is Ownable2Step, Pausable, ReentrancyGuard {
         }
     }
 
+    /// @dev Accrual stops once the token supply is exhausted: nothing accrued after that point could
+    ///      ever be paid, so reporting it would only inflate `pendingRewards` and `SupplyExhausted`.
     function _currentAcc() private view returns (uint256) {
-        if (block.timestamp <= lastUpdate) return accRewardPerSpeed;
+        if (block.timestamp <= lastUpdate || _mintable() == 0) return accRewardPerSpeed;
         return accRewardPerSpeed + rewardRate * (block.timestamp - lastUpdate);
     }
 
