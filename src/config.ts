@@ -54,6 +54,9 @@ export const MISSING_CONTRACTS = (Object.keys(CONTRACTS) as ContractName[]).filt
 
 export const TOKEN_SYMBOL = 'DAPPF';
 
+/** Public address of the web app; shown by MetaMask when the user approves the connection. */
+export const APP_URL = env.VITE_APP_URL || (typeof window === 'undefined' ? '' : window.location.origin);
+
 /** Average block time, used for countdowns (Polygon PoS ≈ 2s). */
 export const BLOCK_TIME_SECONDS = 2;
 

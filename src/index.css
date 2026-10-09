@@ -13,6 +13,25 @@
 
 html {
   color-scheme: dark;
+  /* Safe areas: Capacitor's SystemBars sets --safe-area-inset-* inside the Android app; browsers
+     with notches/gesture bars fill env(). Both are 0 on a plain desktop browser. */
+  --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --sab: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --sal: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+  --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+}
+
+@utility pt-safe {
+  padding-top: var(--sat);
+}
+
+@utility pb-safe {
+  padding-bottom: var(--sab);
+}
+
+@utility px-safe {
+  padding-left: var(--sal);
+  padding-right: var(--sar);
 }
 
 body {

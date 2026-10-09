@@ -16,9 +16,16 @@
     "deploy:polygon": "hardhat run scripts/deploy.cjs --network polygon",
     "withdraw-bot": "hardhat run scripts/auto-withdraw.cjs --network polygon",
     "keeper": "hardhat run scripts/hatch-keeper.cjs --network polygon",
-    "rules:deploy": "firebase deploy --only firestore:rules"
+    "rules:deploy": "firebase deploy --only firestore:rules",
+    "android:sync": "npm run build && cap sync android",
+    "android:open": "cap open android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app-launcher": "^8.0.1",
+    "@capacitor/core": "^8.5.3",
+    "@metamask/connect-evm": "^2.1.1",
     "ethers": "^6.15.0",
     "firebase": "^12.6.0",
     "framer-motion": "^12.23.24",
@@ -27,6 +34,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.4.0",
     "@tailwindcss/vite": "^4.1.0",

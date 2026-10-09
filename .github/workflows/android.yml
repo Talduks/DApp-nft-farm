@@ -1,0 +1,143 @@
+name: Android APK
+
+on:
+  push:
+    branches: ['main', 'claude/**']
+    paths-ignore: ['**.md', 'contracts/**', 'test/**', 'scripts/**', 'firestore.rules']
+  workflow_dispatch:
+
+permissions:
+  contents: write # publishes the APK as the rolling "android-latest" pre-release
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Frontend configuration comes from repository variables (Settings → Secrets and variables →
+      # Actions → Variables). Only non-empty values are written, so unset ones keep the app defaults.
+      - name: Write frontend configuration
+        env:
+          VITE_CHAIN_ID: ${{ vars.VITE_CHAIN_ID }}
+          VITE_CHAIN_NAME: ${{ vars.VITE_CHAIN_NAME }}
+          VITE_RPC_URL: ${{ vars.VITE_RPC_URL }}
+          VITE_EXPLORER_URL: ${{ vars.VITE_EXPLORER_URL }}
+          VITE_CURRENCY: ${{ vars.VITE_CURRENCY }}
+          VITE_APP_URL: ${{ vars.VITE_APP_URL }}
+          VITE_TOKEN_ADDRESS: ${{ vars.VITE_TOKEN_ADDRESS }}
+          VITE_NFT_ADDRESS: ${{ vars.VITE_NFT_ADDRESS }}
+          VITE_FARM_ADDRESS: ${{ vars.VITE_FARM_ADDRESS }}
+          VITE_STAKING_ADDRESS: ${{ vars.VITE_STAKING_ADDRESS }}
+        run: |
+          : > .env.production.local
+          for name in VITE_CHAIN_ID VITE_CHAIN_NAME VITE_RPC_URL VITE_EXPLORER_URL VITE_CURRENCY VITE_APP_URL \
+                      VITE_TOKEN_ADDRESS VITE_NFT_ADDRESS VITE_FARM_ADDRESS VITE_STAKING_ADDRESS; do
+            value="${!name}"
+            if [ -n "$value" ]; then echo "$name=$value" >> .env.production.local; fi
+          done
+          echo "Configured: $(cut -d= -f1 .env.production.local | tr '\n' ' ')"
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      # With the ANDROID_KEYSTORE_* secrets every build is signed with the same key, so new APKs
+      # install over old ones. Without them a throwaway key is generated: the APK installs, but the
+      # next build needs the previous one uninstalled first.
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          keystore="$RUNNER_TEMP/release.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            echo "SIGNING=permanent" >> "$GITHUB_ENV"
+          else
+            KEYSTORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_ALIAS=ephemeral
+            KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            echo "::add-mask::$KEYSTORE_PASSWORD"
+            keytool -genkeypair -noprompt -keystore "$keystore" -storetype PKCS12 -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 4096 -validity 3650 -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=DApp NFT Farm (ephemeral CI key)"
+            echo "SIGNING=ephemeral" >> "$GITHUB_ENV"
+            echo "::warning::ANDROID_KEYSTORE_* secrets not set: signed with a throwaway key (see README)."
+          fi
+          {
+            echo "ANDROID_KEYSTORE_FILE=$keystore"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        working-directory: android
+        env:
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          version="$(node -p "require('../package.json').version")"
+          echo "VERSION_NAME=$version.${{ github.run_number }}" >> "$GITHUB_ENV"
+          ANDROID_VERSION_NAME="$version.${{ github.run_number }}" ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verify signature
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
+          out="dapp-nft-farm-${VERSION_NAME}.apk"
+          cp "$apk" "$out"
+          echo "APK=$out" >> "$GITHUB_ENV"
+          sha256sum "$out" | tee "$out.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK }}
+          path: |
+            ${{ env.APK }}
+            ${{ env.APK }}.sha256
+          if-no-files-found: error
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$SIGNING" = "permanent" ]; then
+            signing="Assinado com a chave permanente do projeto: atualiza por cima da versão anterior."
+          else
+            signing="Assinado com uma chave temporária do CI: para instalar uma build nova, desinstale a anterior antes."
+          fi
+          notes="Build ${{ github.run_number }} de \`${GITHUB_REF_NAME}\` (${GITHUB_SHA::7}).
+
+          ${signing}
+
+          SHA-256: \`$(cut -d' ' -f1 "$APK.sha256")\`
+
+          No Android: baixe o APK, permita \"instalar apps desconhecidos\" para o navegador e abra o arquivo."
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest "$APK" "$APK.sha256" --prerelease --target "$GITHUB_SHA" \
+            --title "App Android ${VERSION_NAME}" --notes "$notes"

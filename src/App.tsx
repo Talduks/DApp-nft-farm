@@ -16,6 +16,7 @@ import { auth } from './services/firebase';
 import { fetchOwners } from './web3/admin';
 import { parseError } from './web3/errors';
 import { fetchFarmData } from './web3/farm';
+import { isNativeApp } from './web3/wallet';
 
 type View = 'dashboard' | 'staking' | 'egg' | 'admin';
 
@@ -146,24 +147,8 @@ function App() {
   ];
 
   const renderGate = () => {
-    if (!wallet.hasWallet) {
-      return (
-        <>
-          <p className="max-w-md text-sm text-slate-400 sm:text-lg">
-            Nenhuma carteira detectada. Instale a MetaMask ou abra este site pelo navegador da sua carteira.
-          </p>
-          <a
-            href="https://metamask.io/download/"
-            target="_blank"
-            rel="noreferrer"
-            className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl transition-transform hover:scale-105"
-          >
-            Instalar MetaMask
-          </a>
-        </>
-      );
-    }
     if (!wallet.account) {
+      const viaMetaMaskApp = wallet.source === 'metamask-connect';
       return (
         <>
           <p className="max-w-md text-sm text-slate-400 sm:text-lg">
@@ -174,8 +159,20 @@ function App() {
             disabled={wallet.connecting}
             className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl shadow-purple-500/20 transition-transform hover:scale-105 disabled:opacity-60"
           >
-            {wallet.connecting ? 'Conectando…' : 'Conectar carteira'}
+            {wallet.connecting ? 'Aguardando a MetaMask…' : viaMetaMaskApp ? 'Conectar com MetaMask' : 'Conectar carteira'}
           </button>
+          {viaMetaMaskApp && (
+            <p className="max-w-sm text-xs text-slate-500">
+              {isNativeApp()
+                ? 'O app da MetaMask vai abrir para você aprovar. Depois de aprovar, volte para este app.'
+                : 'No celular, o app da MetaMask abre para você aprovar; no computador, escaneie o QR code com ele.'}{' '}
+              Não tem a MetaMask?{' '}
+              <a href="https://metamask.io/download/" target="_blank" rel="noreferrer" className="font-semibold text-purple-300 underline">
+                Baixe aqui
+              </a>
+              .
+            </p>
+          )}
         </>
       );
     }
@@ -208,7 +205,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 font-sans text-white selection:bg-purple-500/30">
-      <nav className="sticky top-0 z-50 border-b border-white/10 bg-slate-900/60 backdrop-blur-md">
+      <nav className="pt-safe px-safe sticky top-0 z-50 border-b border-white/10 bg-slate-900/60 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-3 sm:h-20 sm:px-4">
           <button onClick={() => setView('dashboard')} className="flex items-center gap-2 sm:gap-3">
             <div className="rounded-xl bg-gradient-to-tr from-purple-600 to-blue-600 p-1.5 shadow-lg shadow-purple-500/20 sm:p-2.5">
@@ -255,7 +252,7 @@ function App() {
             ) : (
               <button
                 onClick={handleConnect}
-                disabled={wallet.connecting || !wallet.hasWallet}
+                disabled={wallet.connecting}
                 className="flex items-center gap-2 rounded-full bg-gradient-to-r from-purple-600 to-blue-600 px-4 py-2 text-xs font-bold text-white shadow-lg transition-all hover:shadow-purple-500/50 disabled:opacity-60 sm:px-6 sm:py-3 sm:text-sm"
               >
                 <Wallet size={18} />
@@ -274,7 +271,7 @@ function App() {
         </div>
       </nav>
 
-      <main className="mx-auto max-w-7xl px-3 py-4 pb-24 sm:px-4 sm:py-8 md:pb-8">
+      <main className="px-safe mx-auto max-w-7xl px-3 py-4 pb-[calc(6rem+var(--sab))] sm:px-4 sm:py-8 md:pb-[calc(2rem+var(--sab))]">
         {configErrors.length > 0 && (
           <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200" role="alert">
             <AlertTriangle className="h-5 w-5 shrink-0 text-red-400" />
@@ -343,7 +340,7 @@ function App() {
       </main>
 
       {active && (
-        <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-slate-900/90 backdrop-blur-md md:hidden">
+        <nav className="pb-safe px-safe fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-slate-900/90 backdrop-blur-md md:hidden">
           <div className="flex items-stretch justify-around">
             {navItems.map((item) => (
               <button

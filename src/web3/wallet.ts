@@ -1,15 +1,87 @@
+import { Capacitor } from '@capacitor/core';
+import { AppLauncher } from '@capacitor/app-launcher';
 import { BrowserProvider, JsonRpcProvider, getAddress, type JsonRpcSigner, type Provider } from 'ethers';
-import { CHAIN } from '../config';
+import type { MetamaskConnectEVM } from '@metamask/connect-evm';
+import { APP_URL, CHAIN } from '../config';
+
+/**
+ * Wallet access has two sources:
+ *  - an injected provider (`window.ethereum`): browser extension or a wallet's in-app browser;
+ *  - MetaMask Connect, when nothing is injected (Android app, mobile browsers, desktop without the
+ *    extension). It opens the MetaMask app by deep link, or shows a QR code on desktop, and relays
+ *    requests to it. It needs no API key.
+ * Both are EIP-1193 providers, so everything above this module is the same for either.
+ */
+export type WalletSource = 'injected' | 'metamask-connect';
 
 let rpcProvider: JsonRpcProvider | null = null;
 let browserProvider: BrowserProvider | null = null;
+let browserProviderFor: EthereumProvider | null = null;
 let walletChainId: number | null = null;
 
-export const hasWallet = () => typeof window !== 'undefined' && Boolean(window.ethereum);
+let connectClient: MetamaskConnectEVM | null = null;
+let connectProvider: EthereumProvider | null = null;
+let connectLoading: Promise<EthereumProvider> | null = null;
 
-function ethereum(): EthereumProvider {
-  if (!window.ethereum) throw new Error('Nenhuma carteira encontrada. Instale a MetaMask ou abra o site no navegador da sua carteira.');
-  return window.ethereum;
+const METAMASK_PLAY_STORE = 'https://play.google.com/store/apps/details?id=io.metamask';
+/** How long to wait for the user to approve the connection in the MetaMask app. */
+const CONNECT_TIMEOUT_MS = 3 * 60 * 1000;
+
+export const isNativeApp = () => Capacitor.isNativePlatform();
+
+const injected = (): EthereumProvider | undefined => (typeof window === 'undefined' ? undefined : window.ethereum);
+
+export const walletSource = (): WalletSource => (injected() ? 'injected' : 'metamask-connect');
+
+/** The provider wallet calls go to, or null while MetaMask Connect hasn't been loaded yet. */
+function currentProvider(): EthereumProvider | null {
+  return injected() ?? connectProvider;
+}
+
+function provider(): EthereumProvider {
+  const p = currentProvider();
+  if (!p) throw new Error('Conecte sua carteira para continuar.');
+  return p;
+}
+
+async function createConnectProvider(): Promise<EthereumProvider> {
+  const { createEVMClient } = await import('@metamask/connect-evm');
+  const native = isNativeApp();
+  connectClient = await createEVMClient({
+    dapp: { name: 'DApp NFT Farm', url: APP_URL },
+    api: { supportedNetworks: { [CHAIN.hexId as `0x${string}`]: CHAIN.rpcUrl } },
+    analytics: { enabled: false },
+    skipAutoAnnounce: true,
+    // Inside the Android app the WebView can't follow wallet links itself: hand them to the OS,
+    // which opens the MetaMask app (or the Play Store when it isn't installed).
+    mobile: native
+      ? {
+          preferredOpenLink: (link: string) => {
+            AppLauncher.openUrl({ url: link })
+              // `metamask://` links fail when the app isn't installed: send the user to the store.
+              .then(({ completed }) => (completed ? undefined : AppLauncher.openUrl({ url: METAMASK_PLAY_STORE })))
+              .catch((error) => console.error('Could not open MetaMask', error));
+          },
+        }
+      : undefined,
+  });
+  connectProvider = connectClient.getProvider() as unknown as EthereumProvider;
+  return connectProvider;
+}
+
+/**
+ * Resolves the wallet provider, loading MetaMask Connect on demand (it also restores a previous
+ * session, so a returning user is connected without a new approval).
+ */
+export function loadProvider(): Promise<EthereumProvider> {
+  const p = injected();
+  if (p) return Promise.resolve(p);
+  if (!CHAIN.rpcUrl) return Promise.reject(new Error('Configure VITE_RPC_URL para conectar a carteira.'));
+  connectLoading ??= createConnectProvider().catch((error) => {
+    connectLoading = null;
+    throw error;
+  });
+  return connectLoading;
 }
 
 /** Keeps track of the wallet chain so reads can go through the wallet when it is on our chain. */
@@ -19,22 +91,29 @@ export function setWalletChainId(chainId: number | null) {
 }
 
 function getBrowserProvider(): BrowserProvider {
-  if (!browserProvider) browserProvider = new BrowserProvider(ethereum(), CHAIN.id);
+  const p = provider();
+  if (!browserProvider || browserProviderFor !== p) {
+    browserProvider = new BrowserProvider(p, CHAIN.id);
+    browserProviderFor = p;
+  }
   return browserProvider;
 }
 
 /**
- * Reads use the wallet's RPC when it is connected to our chain (more reliable than public RPCs)
- * and fall back to the configured RPC URL otherwise.
+ * Reads use an injected wallet's RPC when it is on our chain (more reliable than public RPCs) and
+ * the configured RPC URL otherwise — including with MetaMask Connect, whose reads would go to the
+ * same URL anyway but through its relay.
  */
 export function getReadProvider(): Provider {
-  if (hasWallet() && walletChainId === CHAIN.id) return getBrowserProvider();
+  if (injected() && walletChainId === CHAIN.id) return getBrowserProvider();
   if (!rpcProvider) rpcProvider = new JsonRpcProvider(CHAIN.rpcUrl, CHAIN.id, { staticNetwork: true });
   return rpcProvider;
 }
 
-export async function getChainId(): Promise<number> {
-  return Number(await ethereum().request({ method: 'eth_chainId' }));
+/** Chain the wallet is on, or null when it can't tell (e.g. MetaMask Connect before connecting). */
+export async function getChainId(): Promise<number | null> {
+  const id = Number(await provider().request({ method: 'eth_chainId' }));
+  return Number.isFinite(id) && id > 0 ? id : null;
 }
 
 /** Throws unless the wallet is on our chain right now. Called immediately before every broadcast. */
@@ -47,38 +126,64 @@ export async function assertWalletChain(): Promise<void> {
 }
 
 export async function getAccounts(): Promise<string[]> {
-  if (!hasWallet()) return [];
-  const accounts = (await ethereum().request({ method: 'eth_accounts' })) as string[];
+  const p = currentProvider();
+  if (!p) return [];
+  const accounts = ((await p.request({ method: 'eth_accounts' })) as string[] | undefined) ?? [];
   return accounts.map((a) => getAddress(a));
 }
 
 export async function requestAccount(): Promise<string> {
-  const accounts = (await ethereum().request({ method: 'eth_requestAccounts' })) as string[];
+  const p = await loadProvider();
+  let accounts: string[];
+  if (connectClient && p === connectProvider) {
+    // Asks MetaMask for our chain up front, so the user approves account + network in one step.
+    // The approval happens in another app; give up after a while so the button never stays stuck.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('A MetaMask não respondeu. Abra o app da MetaMask, aprove a conexão e tente de novo.')),
+        CONNECT_TIMEOUT_MS,
+      );
+    });
+    try {
+      ({ accounts } = await Promise.race([connectClient.connect({ chainIds: [CHAIN.hexId as `0x${string}`] }), timeout]));
+    } finally {
+      clearTimeout(timer);
+    }
+  } else {
+    accounts = (await p.request({ method: 'eth_requestAccounts' })) as string[];
+  }
   if (!accounts.length) throw new Error('Nenhuma conta autorizada na carteira.');
   return getAddress(accounts[0]);
 }
 
+const chainParameters = () => ({
+  chainId: CHAIN.hexId,
+  chainName: CHAIN.name,
+  rpcUrls: [CHAIN.rpcUrl],
+  nativeCurrency: { name: CHAIN.currency, symbol: CHAIN.currency, decimals: 18 },
+  blockExplorerUrls: CHAIN.explorer ? [CHAIN.explorer] : undefined,
+});
+
 export async function switchNetwork(): Promise<void> {
-  const eth = ethereum();
-  try {
-    await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN.hexId }] });
-  } catch (error) {
-    const code = (error as { code?: number })?.code;
-    if (code !== 4902) throw error;
-    await eth.request({
-      method: 'wallet_addEthereumChain',
-      params: [
-        {
-          chainId: CHAIN.hexId,
-          chainName: CHAIN.name,
-          rpcUrls: [CHAIN.rpcUrl],
-          nativeCurrency: { name: CHAIN.currency, symbol: CHAIN.currency, decimals: 18 },
-          blockExplorerUrls: CHAIN.explorer ? [CHAIN.explorer] : undefined,
-        },
-      ],
-    });
+  const p = provider();
+  if (connectClient && p === connectProvider) {
+    await connectClient.switchChain({ chainId: CHAIN.hexId as `0x${string}`, chainConfiguration: chainParameters() });
+  } else {
+    try {
+      await p.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN.hexId }] });
+    } catch (error) {
+      const code = (error as { code?: number })?.code;
+      if (code !== 4902) throw error;
+      await p.request({ method: 'wallet_addEthereumChain', params: [chainParameters()] });
+    }
   }
   setWalletChainId(await getChainId());
+}
+
+/** Ends a MetaMask Connect session (logout). Injected wallets have no programmatic disconnect. */
+export async function disconnectWallet(): Promise<void> {
+  if (connectClient && connectClient.status !== 'disconnected') await connectClient.disconnect();
 }
 
 /**

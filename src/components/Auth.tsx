@@ -34,7 +34,7 @@ const Auth = () => {
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-slate-950 p-4">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-slate-950 p-4 pt-[calc(1rem+var(--sat))] pb-[calc(1rem+var(--sab))]">
       <div className="pointer-events-none absolute inset-0">
         <div className="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-purple-600/20 blur-[100px]" />
         <div className="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-blue-600/20 blur-[100px]" />

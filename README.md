@@ -15,6 +15,7 @@ Ovo (POL) ──choca──▶ Speed NFT ──stake──▶ NFTFarm ──emit
 | `scripts/` | `deploy.cjs` (deploy + permissões + endereços), `auto-withdraw.cjs` (varre vendas para a tesouraria) e `hatch-keeper.cjs` (choca ovos esquecidos) |
 | `src/` | Frontend React 19 + Vite + Tailwind 4 + ethers v6 + Firebase |
 | `firestore.rules` | Regras de segurança do Firestore (obrigatório publicar — `npm run rules:deploy`) |
+| `android/`, `capacitor.config.ts` | App Android (Capacitor); APK gerado pelo workflow `.github/workflows/android.yml` |
 
 ## Rodando localmente
 
@@ -63,6 +64,26 @@ Os dois bots usam `PRIVATE_KEY` só para pagar gás. Use uma carteira separada c
 
 - `npm run withdraw-bot` chama `withdrawToTreasury()`, que qualquer um pode executar e que sempre paga a tesouraria fixada on-chain pelo dono (`setTreasury`). Um bot comprometido só consegue antecipar o saque, nunca desviá-lo.
 - `npm run keeper` choca os ovos que os compradores não chocaram (fecharam a aba, caiu a conexão) antes que o prazo de 256 blocos expire. `hatchEggs` é pública e sempre cunha para o dono do ovo.
+
+## App Android (APK)
+
+O app Android é o mesmo frontend empacotado com [Capacitor](https://capacitorjs.com) (pasta `android/`). Dentro dele não existe extensão de carteira, então a conexão usa a **MetaMask Connect**: ao tocar em "Conectar com MetaMask", o app da MetaMask abre para você aprovar (ou a Play Store, se ela não estiver instalada) e depois é só voltar para o app. Não precisa de chave de API. A mesma integração passa a valer no navegador do celular e no computador sem a extensão (lá ela mostra um QR code).
+
+**Gerar o APK pelo GitHub (recomendado):** cada push nesta branch ou na `main` roda o workflow `.github/workflows/android.yml`, que compila, assina e publica o arquivo em **Releases → `android-latest`** (pré-release). No celular, baixe o `.apk`, permita "instalar apps desconhecidos" para o navegador e abra o arquivo. Também dá para rodar manualmente em *Actions → Android APK → Run workflow*.
+
+A configuração do app vem das **variáveis do repositório** (*Settings → Secrets and variables → Actions → Variables*), as mesmas do `.env.local`: `VITE_CHAIN_ID`, `VITE_TOKEN_ADDRESS`, `VITE_NFT_ADDRESS`, `VITE_FARM_ADDRESS`, `VITE_STAKING_ADDRESS` e, opcionalmente, `VITE_RPC_URL`, `VITE_EXPLORER_URL`, `VITE_APP_URL`. Depois de mudar, rode o workflow de novo para gerar um APK atualizado.
+
+**Assinatura:** sem configuração, cada build é assinada com uma chave temporária — o APK instala normalmente, mas para instalar uma build nova é preciso desinstalar a anterior. Para atualizações por cima, crie uma chave uma única vez e cadastre-a como *secrets* do repositório:
+
+```bash
+keytool -genkeypair -keystore release.jks -storetype PKCS12 -alias dappnftfarm \
+  -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=DApp NFT Farm"
+base64 -w0 release.jks   # valor de ANDROID_KEYSTORE_BASE64
+```
+
+Secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`dappnftfarm`) e `ANDROID_KEY_PASSWORD` (a mesma senha, em PKCS12). Guarde o `release.jks` fora do repositório: quem tiver essa chave pode publicar atualizações do app.
+
+**Gerar localmente** (precisa do Android Studio / Android SDK e JDK 21): `npm run android:apk` gera `android/app/build/outputs/apk/release/`; `npm run android:open` abre o projeto no Android Studio. Ícone e splash vêm de `assets/` e são regenerados com `npx @capacitor/assets generate --android`.
 
 ## Firebase
 

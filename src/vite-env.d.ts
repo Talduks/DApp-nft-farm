@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   readonly VITE_RPC_URL?: string;
   readonly VITE_EXPLORER_URL?: string;
   readonly VITE_CURRENCY?: string;
+  readonly VITE_APP_URL?: string;
   readonly VITE_TOKEN_ADDRESS?: string;
   readonly VITE_NFT_ADDRESS?: string;
   readonly VITE_FARM_ADDRESS?: string;
