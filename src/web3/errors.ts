@@ -81,6 +81,8 @@ export function parseError(error: unknown): string {
   if (name && MESSAGES[name]) return MESSAGES[name];
 
   if (e?.code === 'CALL_EXCEPTION') return 'A transação foi recusada pelo contrato.';
+  const inner = `${e?.message ?? ''} ${e?.error?.message ?? ''} ${e?.info?.error?.message ?? ''}`;
+  if (/timed out|timeout/i.test(inner)) return 'A MetaMask não respondeu a tempo. Abra o app da MetaMask e tente de novo.';
   if (e?.code === 'NETWORK_ERROR' || e?.code === 'TIMEOUT') return 'Erro de rede. Verifique sua conexão e tente novamente.';
   if (e?.code === -32002) return 'Já existe uma solicitação pendente na sua carteira. Abra a extensão para continuar.';
   return e?.shortMessage || e?.reason || e?.message || 'Erro desconhecido.';

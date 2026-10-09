@@ -24,8 +24,55 @@ let connectProvider: EthereumProvider | null = null;
 let connectLoading: Promise<EthereumProvider> | null = null;
 
 const METAMASK_PLAY_STORE = 'https://play.google.com/store/apps/details?id=io.metamask';
-/** How long to wait for the user to approve the connection in the MetaMask app. */
-const CONNECT_TIMEOUT_MS = 3 * 60 * 1000;
+/**
+ * How long to wait for the user to approve the connection in the MetaMask app. Kept below the
+ * library's own 120 s transport timeout so the user gets our message instead of its English one.
+ */
+const CONNECT_TIMEOUT_MS = 110 * 1000;
+
+/**
+ * Node methods. MetaMask Connect answers these from a read-only RPC but drops JSON-RPC errors
+ * (a reverted gas estimate resolves `undefined`), so they go to the app's own RPC instead and
+ * fail with the real revert reason. Accounts, chain and signing stay with the wallet.
+ */
+const NODE_METHODS = new Set([
+  'eth_blockNumber',
+  'eth_call',
+  'eth_estimateGas',
+  'eth_feeHistory',
+  'eth_gasPrice',
+  'eth_getBalance',
+  'eth_getBlockByHash',
+  'eth_getBlockByNumber',
+  'eth_getCode',
+  'eth_getLogs',
+  'eth_getStorageAt',
+  'eth_getTransactionByHash',
+  'eth_getTransactionCount',
+  'eth_getTransactionReceipt',
+  'eth_maxPriorityFeePerGas',
+  'net_version',
+]);
+
+let rpcRequestId = 1;
+
+function routeNodeMethodsToRpc(wallet: EthereumProvider): EthereumProvider {
+  return {
+    async request({ method, params }) {
+      if (!NODE_METHODS.has(method)) return wallet.request({ method, params });
+      const rpc = getRpcProvider();
+      const [response] = await rpc._send({ id: rpcRequestId++, jsonrpc: '2.0', method, params: (params ?? []) as unknown[] });
+      if ('error' in response) {
+        // Same shape an injected wallet would reject with, so ethers maps it the same way.
+        const { code, message, data } = response.error as { code: number; message: string; data?: unknown };
+        throw Object.assign(new Error(message), { code, data });
+      }
+      return response.result;
+    },
+    on: (event, listener) => wallet.on?.(event, listener),
+    removeListener: (event, listener) => wallet.removeListener?.(event, listener),
+  };
+}
 
 export const isNativeApp = () => Capacitor.isNativePlatform();
 
@@ -65,7 +112,7 @@ async function createConnectProvider(): Promise<EthereumProvider> {
         }
       : undefined,
   });
-  connectProvider = connectClient.getProvider() as unknown as EthereumProvider;
+  connectProvider = routeNodeMethodsToRpc(connectClient.getProvider() as unknown as EthereumProvider);
   return connectProvider;
 }
 
@@ -106,6 +153,10 @@ function getBrowserProvider(): BrowserProvider {
  */
 export function getReadProvider(): Provider {
   if (injected() && walletChainId === CHAIN.id) return getBrowserProvider();
+  return getRpcProvider();
+}
+
+function getRpcProvider(): JsonRpcProvider {
   if (!rpcProvider) rpcProvider = new JsonRpcProvider(CHAIN.rpcUrl, CHAIN.id, { staticNetwork: true });
   return rpcProvider;
 }

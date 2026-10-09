@@ -3,15 +3,17 @@ import {
   Interface,
   isError,
   type ContractRunner,
-  type ContractTransactionResponse,
   type TransactionReceipt,
+  type TransactionResponse,
 } from 'ethers';
 import { CHAIN, CONTRACTS, type ContractName } from '../config';
 import { FARM_ABI, NFT_ABI, STAKING_ABI, TOKEN_ABI } from './abis';
-import { assertWalletChain, getReadProvider, getSigner } from './wallet';
+import { assertWalletChain, getAccounts, getReadProvider, getSigner, walletSource } from './wallet';
 
 /** How long to wait for a confirmation before giving up (the transaction may still land later). */
 const CONFIRMATION_TIMEOUT_MS = 10 * 60 * 1000;
+/** After a lost MetaMask Connect answer, how long to keep looking for the transaction on-chain. */
+const LOST_ANSWER_WINDOW_MS = 4 * 60 * 1000;
 
 const ABIS: Record<ContractName, string[]> = {
   token: TOKEN_ABI,
@@ -54,18 +56,81 @@ export interface TxCallbacks {
   onStep?: (message: string) => void;
 }
 
+/** Errors after which nothing can have been broadcast: the user said no, or the node refused it. */
+function isDefinitiveFailure(error: unknown): boolean {
+  const e = error as { code?: unknown; info?: { error?: { code?: unknown } } };
+  if (e?.code === 'ACTION_REJECTED' || e?.code === 4001 || e?.info?.error?.code === 4001) return true;
+  return ['CALL_EXCEPTION', 'INSUFFICIENT_FUNDS', 'NONCE_EXPIRED', 'REPLACEMENT_UNDERPRICED', 'INVALID_ARGUMENT'].includes(
+    e?.code as string,
+  );
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Looks for the transaction `account` sent with `nonce` to one of our contracts, scanning blocks
+ * from `fromBlock` as they are mined. Returns null when nothing shows up within the window.
+ */
+async function findSentTransaction(account: string, nonce: number, fromBlock: number): Promise<TransactionResponse | null> {
+  const provider = getReadProvider();
+  const ours = new Set(Object.values(CONTRACTS).map((a) => a.toLowerCase()));
+  const deadline = Date.now() + LOST_ANSWER_WINDOW_MS;
+  let next = fromBlock;
+  while (Date.now() < deadline) {
+    try {
+      if ((await provider.getTransactionCount(account, 'latest')) > nonce) {
+        const latest = await provider.getBlockNumber();
+        for (; next <= latest; next++) {
+          const block = await provider.getBlock(next, true);
+          const tx = block?.prefetchedTransactions.find(
+            (t) => t.from.toLowerCase() === account.toLowerCase() && t.nonce === nonce,
+          );
+          if (tx) return tx.to && ours.has(tx.to.toLowerCase()) ? tx : null;
+        }
+      }
+    } catch (error) {
+      console.warn('Still looking for the transaction', error);
+    }
+    await sleep(4000);
+  }
+  return null;
+}
+
 /**
  * Broadcasts a transaction and waits for its receipt. `send` is a thunk so the network can be
  * re-checked right before broadcasting: multi-step flows reuse one signer and the wallet may
  * have switched chains in between.
+ *
+ * With MetaMask Connect, the request travels to the MetaMask app through a relay that gives up
+ * after 60 s while the user may still approve it there. Such a lost answer is not a failure: the
+ * transaction is traced on-chain by the account's nonce, so the user is never invited to pay twice.
  */
-export async function sendTx(
-  send: () => Promise<ContractTransactionResponse>,
-  callbacks?: TxCallbacks,
-): Promise<TransactionReceipt> {
+export async function sendTx(send: () => Promise<TransactionResponse>, callbacks?: TxCallbacks): Promise<TransactionReceipt> {
   await assertWalletChain();
-  const startBlock = await getReadProvider().getBlockNumber();
-  const tx = await send();
+  const provider = getReadProvider();
+  const startBlock = await provider.getBlockNumber();
+
+  let watch: { account: string; nonce: number } | null = null;
+  if (walletSource() === 'metamask-connect') {
+    const [account] = await getAccounts();
+    if (account) watch = { account, nonce: await provider.getTransactionCount(account, 'pending') };
+  }
+
+  let tx: TransactionResponse;
+  try {
+    tx = await send();
+  } catch (error) {
+    if (!watch || isDefinitiveFailure(error)) throw error;
+    console.warn('No answer from the wallet; looking for the transaction on-chain', error);
+    callbacks?.onStep?.('A MetaMask ainda não respondeu. Se você aprovou, aguarde: procurando a transação na rede…');
+    const found = await findSentTransaction(watch.account, watch.nonce, startBlock);
+    if (!found) {
+      throw new Error(
+        'A MetaMask não confirmou a tempo. Se você ainda aprovar no app da MetaMask, a transação pode ser enviada: confira lá antes de tentar de novo.',
+      );
+    }
+    tx = found;
+  }
   callbacks?.onSent?.(tx.hash);
 
   let receipt: TransactionReceipt | null;

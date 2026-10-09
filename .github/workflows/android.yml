@@ -13,12 +13,18 @@ concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash # bash -eo pipefail: a failing command in a pipe fails the step
+
 jobs:
   apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -48,10 +54,19 @@ jobs:
           VITE_NFT_ADDRESS: ${{ vars.VITE_NFT_ADDRESS }}
           VITE_FARM_ADDRESS: ${{ vars.VITE_FARM_ADDRESS }}
           VITE_STAKING_ADDRESS: ${{ vars.VITE_STAKING_ADDRESS }}
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ vars.VITE_FIREBASE_MEASUREMENT_ID }}
         run: |
           : > .env.production.local
           for name in VITE_CHAIN_ID VITE_CHAIN_NAME VITE_RPC_URL VITE_EXPLORER_URL VITE_CURRENCY VITE_APP_URL \
-                      VITE_TOKEN_ADDRESS VITE_NFT_ADDRESS VITE_FARM_ADDRESS VITE_STAKING_ADDRESS; do
+                      VITE_TOKEN_ADDRESS VITE_NFT_ADDRESS VITE_FARM_ADDRESS VITE_STAKING_ADDRESS \
+                      VITE_FIREBASE_API_KEY VITE_FIREBASE_AUTH_DOMAIN VITE_FIREBASE_PROJECT_ID VITE_FIREBASE_STORAGE_BUCKET \
+                      VITE_FIREBASE_MESSAGING_SENDER_ID VITE_FIREBASE_APP_ID VITE_FIREBASE_MEASUREMENT_ID; do
             value="${!name}"
             if [ -n "$value" ]; then echo "$name=$value" >> .env.production.local; fi
           done
@@ -108,6 +123,7 @@ jobs:
         run: |
           apk=android/app/build/outputs/apk/release/app-release.apk
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          [ -x "$apksigner" ] || { echo "::error::apksigner not found in $ANDROID_HOME/build-tools"; exit 1; }
           "$apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
           out="dapp-nft-farm-${VERSION_NAME}.apk"
           cp "$apk" "$out"

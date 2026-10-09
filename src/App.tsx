@@ -159,7 +159,13 @@ function App() {
             disabled={wallet.connecting}
             className="rounded-full bg-white px-8 py-4 text-lg font-bold text-slate-900 shadow-xl shadow-purple-500/20 transition-transform hover:scale-105 disabled:opacity-60"
           >
-            {wallet.connecting ? 'Aguardando a MetaMask…' : viaMetaMaskApp ? 'Conectar com MetaMask' : 'Conectar carteira'}
+            {wallet.connecting
+              ? viaMetaMaskApp
+                ? 'Aguardando a MetaMask…'
+                : 'Conectando…'
+              : viaMetaMaskApp
+                ? 'Conectar com MetaMask'
+                : 'Conectar carteira'}
           </button>
           {viaMetaMaskApp && (
             <p className="max-w-sm text-xs text-slate-500">
@@ -271,7 +277,7 @@ function App() {
         </div>
       </nav>
 
-      <main className="px-safe mx-auto max-w-7xl px-3 py-4 pb-[calc(6rem+var(--sab))] sm:px-4 sm:py-8 md:pb-[calc(2rem+var(--sab))]">
+      <main className="mx-auto max-w-7xl pt-4 pr-[calc(0.75rem+var(--sar))] pb-[calc(6rem+var(--sab))] pl-[calc(0.75rem+var(--sal))] sm:pt-8 sm:pr-[calc(1rem+var(--sar))] sm:pl-[calc(1rem+var(--sal))] md:pb-[calc(2rem+var(--sab))]">
         {configErrors.length > 0 && (
           <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200" role="alert">
             <AlertTriangle className="h-5 w-5 shrink-0 text-red-400" />

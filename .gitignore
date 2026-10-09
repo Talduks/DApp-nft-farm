@@ -25,6 +25,11 @@ deployments/hardhat.json
 # Archives (the original upload contained a private key)
 *.zip
 
+# Android signing keys: whoever holds one can publish app updates
+*.jks
+*.keystore
+*.p12
+
 # Logs
 logs
 *.log

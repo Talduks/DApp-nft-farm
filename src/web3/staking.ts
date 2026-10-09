@@ -2,7 +2,7 @@ import { Signature, verifyTypedData, type Contract, type JsonRpcSigner } from 'e
 import { CONTRACTS } from '../config';
 import { readContract, sendTx, writeContract, type TxCallbacks } from './contracts';
 import { isUserRejection, revertName } from './errors';
-import { getReadProvider } from './wallet';
+import { getReadProvider, walletSource } from './wallet';
 
 const PERMIT_TYPES = {
   Permit: [
@@ -113,7 +113,9 @@ export async function stakeTokens(amount: bigint, months: number, callbacks?: Tx
     callbacks?.onStep?.('Assine a autorização na carteira (sem custo de gás)…');
     permit = await signPermit(token, signer, owner, amount);
   } catch (error) {
-    if (isUserRejection(error)) throw error;
+    // MetaMask always signs typed data, so a failure there is a lost/declined request whose prompt
+    // may still be open in the app: don't stack an approve on top of it.
+    if (isUserRejection(error) || walletSource() === 'metamask-connect') throw error;
     console.warn('Wallet could not sign the permit, falling back to approve + stake', error);
   }
   if (permit) {
